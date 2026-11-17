@@ -274,7 +274,7 @@ def _ball_xy(segs, t_arr, g):
 
 
 def choreograph(analysis: dict, seed: int = 1, palette: str = "neon", min_gap: float = 0.17,
-                max_gap: float = 1.3, offset: float = -0.01) -> dict:
+                max_gap: float = 1.3, offset: float = -0.023) -> dict:
     notes = select_notes(analysis, min_gap, max_gap, offset)
     if len(notes) < 2:
         raise SystemExit("Not enough onsets found in this audio to choreograph.")
