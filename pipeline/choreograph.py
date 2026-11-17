@@ -21,6 +21,8 @@ PLATE_TH = 0.14
 CONTACT = BALL_R + PLATE_TH / 2  # ball centre to plate centre line at impact
 CORRIDOR = 3.1  # half width the path should stay inside
 CAM_FPS = 60
+FINE_STEP = 0.0005  # time step for arcs that touch the plate being placed (matches verify)
+SELF_TOL = 1e-3  # allowed dip below CONTACT for those arcs; verify allows 2e-3
 
 PALETTES = {
     "neon": ["#2f8bff", "#ffd60a", "#3ddc84", "#b388ff", "#ff4d5a", "#ff9f1c", "#ff8fd0", "#3df0e0"],
@@ -116,7 +118,7 @@ def _solve(times: list[float], g: float, rng: random.Random, t_end: float) -> tu
     iters: dict[int, list] = {}
     backtracks = 0
     deepest = 0
-    WINDOW = 160
+    WINDOW = 200  # same neighbourhood verify checks
 
     def candidates(i: int) -> list:
         p, v_in = pos[i], vin[i]
@@ -179,14 +181,23 @@ def _solve(times: list[float], g: float, rng: random.Random, t_end: float) -> tu
             old = np.concatenate(arcs[alo:-1])
             if _pt_seg_dist(old, a[None], b[None]).min() < CONTACT + 0.1:
                 return None
-        arriving = arcs[-1]
-        if arriving.size and _pt_seg_dist(arriving, a[None], b[None]).min() < CONTACT - 0.01:
+        # The arcs touching this plate (arriving and outgoing) are checked at the same
+        # fine resolution and tighter tolerance than `verify`, otherwise a shallow
+        # graze slips through the coarse samples and verification rejects the path.
+        if i > 0:
+            prev = steps[i - 1]
+            ftau, fpts = _arc_points(pos[i - 1], prev["v_out"], g, prev["dt"], step=FINE_STEP)
+            arriving = fpts[(ftau > 0.002) & (ftau < prev["dt"] - 0.002)]
+        else:
+            arriving = arcs[-1]
+        if arriving.size and _pt_seg_dist(arriving, a[None], b[None]).min() < CONTACT - SELF_TOL:
             return None
-        # outgoing arc against every plate, including this one
+        ftau, fpts = _arc_points(p, v_out, g, dt, step=FINE_STEP)
+        keep = fpts[ftau > 0.002]
+        if _pt_seg_dist(keep, a[None], b[None]).min() < CONTACT - SELF_TOL:
+            return None
+        # outgoing arc against every other plate
         tau, pts = _arc_points(p, v_out, g, dt)
-        keep = pts[tau > 0.03]
-        if _pt_seg_dist(keep, a[None], b[None]).min() < CONTACT - 0.01:
-            return None
         if len(seg_a) > lo and _pt_seg_dist(pts, A, B).min() < CONTACT + 0.1:
             return None
         # stored arc excludes the last instants, which belong to the next plate
