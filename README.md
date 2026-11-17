@@ -16,7 +16,7 @@ The video is written to `out/<song>.mp4`. Useful options:
 | `--seed 2` | A different plate layout for the same song |
 | `--palette neon\|sunset\|ice` | Plate colours |
 | `--min-gap 0.17` | Shortest time between bounces, in seconds. Raise it for fewer bounces |
-| `--offset -0.01` | Shift every bounce earlier or later, in seconds |
+| `--offset -0.023` | Shift every bounce earlier or later, in seconds |
 | `--no-render` | Stop after choreography, then preview with `npm run dev` |
 | `--frames 0-299` | Render only part of the video |
 | `--scale 0.5` | Render at half size for a quick draft |
