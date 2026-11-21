@@ -220,8 +220,8 @@ class TestAudioAssessmentAndScoring(unittest.TestCase):
             fast_wav = tmp_dir / "fast_piano.wav"
             pop_wav = tmp_dir / "noisy_pop.wav"
 
-            _synth_piano_wav(slow_wav, duration=14.0, interval=0.50)  # ~2 onsets/s
-            _synth_piano_wav(fast_wav, duration=14.0, interval=0.14)  # ~7 onsets/s
+            _synth_piano_wav(slow_wav, duration=14.0, interval=0.60)  # ~1.67 onsets/s
+            _synth_piano_wav(fast_wav, duration=14.0, interval=0.18)  # ~5.5 onsets/s
             _synth_noisy_pop_wav(pop_wav, duration=14.0)
 
             slow_a = assess_audio_file(slow_wav)
@@ -231,7 +231,7 @@ class TestAudioAssessmentAndScoring(unittest.TestCase):
             # Slow clean piano passes all criteria
             self.assertEqual(evaluate_audio_criteria(slow_a, criteria), [])
             self.assertGreaterEqual(slow_a.piano_score, 0.80)
-            self.assertLessEqual(slow_a.onsets_per_sec, 3.0)
+            self.assertLessEqual(slow_a.onsets_per_sec, 2.0)
 
             # Fast piano fails pace checks but still reads as piano
             fast_reasons = evaluate_audio_criteria(fast_a, criteria)
@@ -244,19 +244,44 @@ class TestAudioAssessmentAndScoring(unittest.TestCase):
             self.assertTrue(any("piano purity" in r for r in pop_reasons))
             self.assertLess(pop_a.piano_score, criteria.min_piano_score)
 
+    def test_busy_final_chorus_rejected_by_full_track_scan(self) -> None:
+        """A track with a slow first 70% and a frantic final 30% should be rejected."""
+        criteria = DiscoveryCriteria()
+        with tempfile.TemporaryDirectory() as tmp:
+            sr = 22050
+            p = Path(tmp) / "climax.wav"
+            # 24s slow (~1.4/s) + 12s frantic (~6/s)
+            slow_p = Path(tmp) / "a.wav"
+            fast_p = Path(tmp) / "b.wav"
+            _synth_piano_wav(slow_p, duration=24.0, interval=0.70, sr=sr)
+            _synth_piano_wav(fast_p, duration=12.0, interval=0.16, sr=sr)
+            y1, _ = sf.read(str(slow_p))
+            y2, _ = sf.read(str(fast_p))
+            sf.write(str(p), np.concatenate([y1, y2]), sr)
+
+            a = assess_audio_file(p)
+            reasons = evaluate_audio_criteria(a, criteria)
+            self.assertTrue(reasons)
+            self.assertGreater(a.p90_onsets_per_sec, criteria.max_p90_onsets_per_sec)
+
     def test_overall_score_rewards_higher_popularity(self) -> None:
         a = AudioAssessment(
-            sample_duration=50.0,
-            windows_analyzed=2,
-            total_onsets=110,
-            onsets_per_sec=2.2,
-            peak_onsets_per_sec=2.6,
-            picked_per_sec=2.1,
-            median_ioi=0.40,
-            p25_ioi=0.28,
+            sample_duration=180.0,
+            windows_analyzed=3,
+            total_onsets=250,
+            onsets_per_sec=1.4,
+            p90_onsets_per_sec=1.8,
+            peak_onsets_per_sec=2.1,
+            picked_per_sec=1.4,
+            median_ioi=0.55,
+            p25_ioi=0.42,
             fast_frac=0.03,
+            sensitive_onsets_per_sec=1.6,
+            sensitive_p90_onsets_per_sec=2.1,
+            sensitive_median_ioi=0.50,
+            sensitive_fast_frac=0.08,
             duo_gain=1.03,
-            tempo=80.0,
+            tempo=72.0,
             harmonic_ratio=0.96,
             spectral_flatness=0.00003,
             spectral_centroid=850.0,
@@ -343,8 +368,8 @@ class TestCatalogAndEndToEndDiscovery(unittest.TestCase):
             tmp_dir = Path(tmp)
             slow_wav = tmp_dir / "slow.wav"
             fast_wav = tmp_dir / "fast.wav"
-            _synth_piano_wav(slow_wav, duration=12.0, interval=0.50)
-            _synth_piano_wav(fast_wav, duration=12.0, interval=0.14)
+            _synth_piano_wav(slow_wav, duration=12.0, interval=0.60)
+            _synth_piano_wav(fast_wav, duration=12.0, interval=0.18)
 
             orig = VideoCandidate(
                 video_id="ORIG0000001",
@@ -374,7 +399,7 @@ class TestCatalogAndEndToEndDiscovery(unittest.TestCase):
                 video_id="PIANOSLOW01",
                 url="https://www.youtube.com/watch?v=PIANOSLOW01",
                 title="Adele - Someone Like You (Solo Piano Cover)",
-                channel="Gentle Piano",
+                channel="Keys Studio",
                 duration=290.0,
                 view_count=900_000,
             )
@@ -382,7 +407,7 @@ class TestCatalogAndEndToEndDiscovery(unittest.TestCase):
             client = _FakeClient(
                 search_map={
                     "2010s ballads": [orig],
-                    "Adele Someone Like You piano cover": [fast_cover, slow_cover],
+                    "Adele Someone Like You slow piano": [fast_cover, slow_cover],
                 },
                 meta_map={
                     "ORIG0000001": orig_enriched,

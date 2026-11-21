@@ -66,17 +66,23 @@ DEFAULT_POPULAR_QUERIES: tuple[str, ...] = (
 )
 
 DEFAULT_DIRECT_PIANO_QUERIES: tuple[str, ...] = (
-    "popular song solo piano cover",
-    "sad pop ballad piano cover",
-    "emotional hit song piano cover",
-    "movie soundtrack solo piano cover",
-    "classic love song piano cover",
-    "slow piano cover famous pop song",
+    "slow piano cover popular song",
+    "easy slow piano ballad cover",
+    "soft minimalist piano cover pop song",
+    "piano lullaby popular song",
+    "slow emotional solo piano cover",
+    "movie soundtrack slow solo piano",
 )
 
 # Keywords indicating piano-style audio.
 _PIANO_POSITIVE_RE = re.compile(
     r"\b(piano|pianist|grand\s+piano|solo\s+piano|acoustic\s+piano|synthesia|piano\s+cover|piano\s+version|piano\s+instrumental|piano\s+arrangement)\b",
+    re.IGNORECASE,
+)
+
+# Positive ranking signal for genuinely slow/sparse arrangements.
+_SLOW_PIANO_HINT_RE = re.compile(
+    r"\b(slow|slowed|easy|simple|beginner|lullaby|soft|gentle|minimalist|calm|peaceful|relaxing|acoustic|quiet)\b",
     re.IGNORECASE,
 )
 
@@ -147,15 +153,20 @@ class VideoCandidate:
 @dataclass(frozen=True)
 class DiscoveryCriteria:
     min_original_views: int = 50_000_000
-    min_piano_views: int = 50_000
+    min_piano_views: int = 20_000
     min_duration: float = 90.0
     max_duration: float = 420.0
-    min_onsets_per_sec: float = 0.6
-    max_onsets_per_sec: float = 3.6
-    max_peak_onsets_per_sec: float = 4.5
-    min_median_ioi: float = 0.24
-    max_fast_frac: float = 0.18
-    max_duo_gain: float = 1.25
+    min_onsets_per_sec: float = 0.5
+    max_onsets_per_sec: float = 2.0
+    max_p90_onsets_per_sec: float = 2.5
+    max_peak_onsets_per_sec: float = 4.0
+    min_median_ioi: float = 0.40
+    fast_ioi_threshold: float = 0.25
+    max_fast_frac: float = 0.20
+    max_sensitive_onsets_per_sec: float = 2.5
+    max_sensitive_p90_onsets_per_sec: float = 3.2
+    min_sensitive_median_ioi: float = 0.32
+    max_duo_gain: float = 1.20
     min_piano_score: float = 0.65
     min_gap: float = 0.17
 
@@ -166,11 +177,16 @@ class AudioAssessment:
     windows_analyzed: int
     total_onsets: int
     onsets_per_sec: float
+    p90_onsets_per_sec: float
     peak_onsets_per_sec: float
     picked_per_sec: float
     median_ioi: float
     p25_ioi: float
     fast_frac: float
+    sensitive_onsets_per_sec: float
+    sensitive_p90_onsets_per_sec: float
+    sensitive_median_ioi: float
+    sensitive_fast_frac: float
     duo_gain: float
     tempo: float
     harmonic_ratio: float
@@ -380,12 +396,36 @@ def _norm(x: np.ndarray, pct: float = 95.0) -> np.ndarray:
     return x / ref if ref > 1e-9 else np.zeros_like(x)
 
 
-def _analyze_window(y: np.ndarray, sr: int, min_gap: float) -> dict[str, Any]:
-    """Run one fast STFT + HPSS pass to compute pace and piano-acoustics metrics."""
-    duration = len(y) / sr
-    rms = float(np.sqrt(np.mean(y * y))) if y.size else 0.0
-    rms_db = float(20.0 * math.log10(max(rms, 1e-9)))
+def _window_pace_stats(
+    times: np.ndarray,
+    duration: float,
+    *,
+    window_sec: float = 10.0,
+    hop_sec: float = 2.5,
+    fast_ioi_threshold: float = 0.25,
+) -> tuple[float, float, float, float, float, float]:
+    """Compute (avg_rate, p90_rate, peak_rate, median_ioi, p25_ioi, fast_frac) over a full track."""
+    if len(times) < 2:
+        rate = len(times) / max(duration, 1e-6)
+        return rate, rate, rate, duration, duration, 0.0
+    avg_rate = len(times) / max(duration, 1e-6)
+    iois = np.diff(times)
+    median_ioi = float(np.median(iois))
+    p25_ioi = float(np.percentile(iois, 25))
+    fast_frac = float(np.mean(iois < fast_ioi_threshold))
+    if duration <= window_sec:
+        return avg_rate, avg_rate, avg_rate, median_ioi, p25_ioi, fast_frac
+    starts = np.arange(0.0, max(hop_sec, duration - window_sec + 1e-6), hop_sec)
+    rates = [
+        float(np.sum((times >= s) & (times < s + window_sec)) / min(window_sec, duration - s))
+        for s in starts
+    ]
+    return avg_rate, float(np.percentile(rates, 90)), float(max(rates)), median_ioi, p25_ioi, fast_frac
 
+
+def _analyze_acoustics_slice(y: np.ndarray, sr: int, min_gap: float) -> dict[str, Any]:
+    """Run HPSS + spectral piano-purity & choreography duo_gain check on one slice."""
+    duration = len(y) / sr
     S = np.abs(librosa.stft(y, n_fft=N_FFT, hop_length=HOP))
     H, P = librosa.decompose.hpss(S)
     freqs = librosa.fft_frequencies(sr=sr, n_fft=N_FFT)
@@ -402,7 +442,6 @@ def _analyze_window(y: np.ndarray, sr: int, min_gap: float) -> dict[str, Any]:
     high_freq_ratio = float(np.sum(S2[freqs > 4000.0]) / total_energy)
     piano_band_ratio = float(np.sum(S2[(freqs >= 100.0) & (freqs <= 3500.0)]) / total_energy)
 
-    # Exact same onset detection parameters as pipeline/analyze.py
     def mel_db(mag: np.ndarray) -> np.ndarray:
         return librosa.power_to_db(
             librosa.feature.melspectrogram(S=mag**2, sr=sr, n_mels=64), ref=np.max
@@ -438,32 +477,18 @@ def _analyze_window(y: np.ndarray, sr: int, min_gap: float) -> dict[str, Any]:
             }
         )
 
-    # Tempo (informational; onset density & IOI govern pace filtering)
-    tempo_val, _ = librosa.beat.beat_track(onset_envelope=env_full, sr=sr, hop_length=HOP)
-    tempo = float(np.atleast_1d(tempo_val)[0])
-
-    # Choreograph-aligned 1-ball vs 2-ball gain (choreograph._pick filters strength >= 0.1)
     mini_analysis = {"duration": duration, "notes": notes}
     _, duo_gain = split_notes(mini_analysis, min_gap)
-    sig_notes = [n for n in notes if n["strength"] >= 0.1]
-    cands = [n for n in sig_notes if 0.25 <= n["t"] <= duration - 0.2]
+    cands = [n for n in notes if n["strength"] >= 0.1 and 0.25 <= n["t"] <= duration - 0.2]
     cands.sort(key=lambda n: -(n["strength"] * (0.7 + 0.6 * n["melodic"])))
     picked: list[dict[str, Any]] = []
     for n in cands:
         if all(abs(n["t"] - c["t"]) >= min_gap for c in picked):
             picked.append(n)
 
-    sig_times = np.array([n["t"] for n in sig_notes], dtype=float)
-    iois = np.diff(sig_times) if len(sig_times) > 1 else np.array([], dtype=float)
     return {
-        "duration": duration,
-        "rms_db": rms_db,
-        "total_onsets": len(sig_notes),
-        "onsets_per_sec": len(sig_notes) / max(duration, 1e-6),
         "picked_per_sec": len(picked) / max(duration, 1e-6),
-        "iois": iois,
         "duo_gain": float(duo_gain),
-        "tempo": tempo,
         "harmonic_ratio": harmonic_ratio,
         "spectral_flatness": flatness,
         "spectral_centroid": centroid,
@@ -500,22 +525,37 @@ def compute_piano_score(
 def compute_pace_score(
     *,
     onsets_per_sec: float,
-    peak_onsets_per_sec: float,
+    p90_onsets_per_sec: float,
     median_ioi: float,
     fast_frac: float,
+    sensitive_onsets_per_sec: float,
+    sensitive_p90_onsets_per_sec: float,
+    sensitive_median_ioi: float,
     duo_gain: float,
 ) -> float:
     """Score how comfortable and readable the rhythm pace is for Music Ball Bounce (0..1).
 
-    Sweet spot: ~1.4-2.8 onsets/sec, median note spacing 0.32-0.65s, low burstiness,
-    and single-ball clarity (duo_gain near 1.0).
+    Sweet spot: ~0.9-1.7 onsets/sec (<= ~2.1 sensitive onsets/sec), median note
+    spacing 0.45-0.95s, low <0.25s burstiness, and clean single-ball tracking.
     """
-    s_density = _band_score(onsets_per_sec, lo_bad=0.4, lo_good=1.4, hi_good=2.8, hi_bad=4.5)
-    s_peak = _ramp_down(peak_onsets_per_sec, good=3.2, bad=5.2)
-    s_ioi = _band_score(median_ioi, lo_bad=0.18, lo_good=0.32, hi_good=0.65, hi_bad=1.4)
-    s_fast = _ramp_down(fast_frac, good=0.05, bad=0.28)
-    s_duo = _ramp_down(duo_gain, good=1.08, bad=1.38)
-    score = 0.30 * s_density + 0.15 * s_peak + 0.25 * s_ioi + 0.15 * s_fast + 0.15 * s_duo
+    s_density = _band_score(onsets_per_sec, lo_bad=0.35, lo_good=0.85, hi_good=1.70, hi_bad=2.60)
+    s_p90 = _ramp_down(p90_onsets_per_sec, good=2.0, bad=3.1)
+    s_ioi = _band_score(median_ioi, lo_bad=0.30, lo_good=0.45, hi_good=0.95, hi_bad=1.80)
+    s_fast = _ramp_down(fast_frac, good=0.06, bad=0.28)
+    s_sen_avg = _ramp_down(sensitive_onsets_per_sec, good=1.8, bad=3.0)
+    s_sen_p90 = _ramp_down(sensitive_p90_onsets_per_sec, good=2.3, bad=3.7)
+    s_sen_ioi = _ramp_up(sensitive_median_ioi, bad=0.24, good=0.44)
+    s_duo = _ramp_down(duo_gain, good=1.05, bad=1.28)
+    score = (
+        0.18 * s_density
+        + 0.14 * s_p90
+        + 0.16 * s_ioi
+        + 0.10 * s_fast
+        + 0.14 * s_sen_avg
+        + 0.12 * s_sen_p90
+        + 0.08 * s_sen_ioi
+        + 0.08 * s_duo
+    )
     return round(_clamp01(score), 4)
 
 
@@ -523,56 +563,77 @@ def assess_audio_file(
     audio_path: Path | str,
     *,
     min_gap: float = 0.17,
-    clip_seconds: float = 25.0,
+    fast_ioi_threshold: float = 0.25,
+    slice_seconds: float = 15.0,
 ) -> AudioAssessment:
-    """Assess an audio file's piano acoustics and pace by sampling representative windows.
+    """Assess an audio file's full-track pace (standard + sensitive) and piano acoustics.
 
-    For tracks longer than 65s, analyzes two windows (at ~25% and ~55% of track
-    duration) so both verse and chorus/climax pace are measured.
+    Pace is measured across the ENTIRE trimmed track using sliding 10-second windows
+    so busy final choruses and pedal-blurred arpeggios are caught. Piano acoustic
+    purity and choreography duo_gain are measured across 3 representative slices
+    (at ~20%, ~50%, and ~75% of the track).
     """
     path = Path(audio_path)
-    y_full, sr = librosa.load(str(path), sr=SR, mono=True)
-    total_dur = len(y_full) / sr
-    if total_dur < 3.0:
-        raise ValueError(f"Audio clip too short to assess ({total_dur:.1f}s)")
+    y_raw, sr = librosa.load(str(path), sr=SR, mono=True)
+    if len(y_raw) / sr < 3.0:
+        raise ValueError(f"Audio clip too short to assess ({len(y_raw) / sr:.1f}s)")
 
-    windows: list[np.ndarray] = []
-    if total_dur <= clip_seconds * 2.4:
-        windows.append(y_full)
+    # Trim leading/trailing silence so long fade-outs don't artificially lower density
+    y_trimmed, _ = librosa.effects.trim(y_raw, top_db=35)
+    y = y_trimmed if len(y_trimmed) / sr >= 8.0 else y_raw
+    total_dur = len(y) / sr
+    rms = float(np.sqrt(np.mean(y * y))) if y.size else 0.0
+    rms_db = float(20.0 * math.log10(max(rms, 1e-9)))
+
+    # 1. Full-track pace scan (fast: STFT + mel onset envelope, no full-track HPSS)
+    S_full = np.abs(librosa.stft(y, n_fft=N_FFT, hop_length=HOP))
+    mel_full = librosa.power_to_db(
+        librosa.feature.melspectrogram(S=S_full**2, sr=sr, n_mels=64), ref=np.max
+    )
+    env_full = librosa.onset.onset_strength(S=mel_full, sr=sr, hop_length=HOP)
+    nf = _norm(env_full)
+    wait = int(0.06 * sr / HOP)
+
+    # Standard onsets (matches pipeline/analyze.py & choreograph._pick)
+    f_std = librosa.onset.onset_detect(
+        onset_envelope=env_full, sr=sr, hop_length=HOP, backtrack=False, delta=0.07, wait=wait
+    )
+    t_std = librosa.frames_to_time(f_std[nf[f_std] >= 0.10], sr=sr, hop_length=HOP)
+    onsets_per_sec, p90_onsets, peak_onsets, median_ioi, p25_ioi, fast_frac = _window_pace_stats(
+        t_std, total_dur, fast_ioi_threshold=fast_ioi_threshold
+    )
+
+    # Sensitive onsets (catches pedal-blurred 8th/16th-note arpeggios & soft fills)
+    f_sen = librosa.onset.onset_detect(
+        onset_envelope=env_full, sr=sr, hop_length=HOP, backtrack=False, delta=0.04, wait=wait
+    )
+    t_sen = librosa.frames_to_time(f_sen[nf[f_sen] >= 0.07], sr=sr, hop_length=HOP)
+    sen_avg, sen_p90, _sen_peak, sen_med_ioi, _sen_p25, sen_fast_frac = _window_pace_stats(
+        t_sen, total_dur, fast_ioi_threshold=fast_ioi_threshold
+    )
+
+    tempo_val, _ = librosa.beat.beat_track(onset_envelope=env_full, sr=sr, hop_length=HOP)
+    tempo = float(np.atleast_1d(tempo_val)[0])
+
+    # 2. Piano acoustics + choreography duo_gain across 3 slices (verse, mid, climax)
+    slices: list[np.ndarray] = []
+    if total_dur <= slice_seconds * 3.2:
+        slices.append(y)
     else:
-        win_len = int(clip_seconds * sr)
-        for frac in (0.25, 0.55):
-            start = int(max(0, min(len(y_full) - win_len, total_dur * frac * sr)))
-            windows.append(y_full[start : start + win_len])
+        win_len = int(slice_seconds * sr)
+        for frac in (0.20, 0.50, 0.75):
+            start = int(max(0, min(len(y) - win_len, total_dur * frac * sr)))
+            slices.append(y[start : start + win_len])
 
-    results = [_analyze_window(w, sr, min_gap) for w in windows]
-    sample_duration = sum(r["duration"] for r in results)
-    total_onsets = sum(r["total_onsets"] for r in results)
-    onsets_per_sec = total_onsets / max(sample_duration, 1e-6)
-    peak_onsets_per_sec = max(r["onsets_per_sec"] for r in results)
-    picked_per_sec = float(np.mean([r["picked_per_sec"] for r in results]))
-
-    all_iois = np.concatenate([r["iois"] for r in results if len(r["iois"]) > 0]) if any(
-        len(r["iois"]) > 0 for r in results
-    ) else np.array([], dtype=float)
-    if all_iois.size:
-        median_ioi = float(np.median(all_iois))
-        p25_ioi = float(np.percentile(all_iois, 25))
-        fast_frac = float(np.mean(all_iois < min_gap))
-    else:
-        median_ioi = sample_duration
-        p25_ioi = sample_duration
-        fast_frac = 0.0
-
-    duo_gain = max(r["duo_gain"] for r in results)
-    tempo = float(np.median([r["tempo"] for r in results]))
-    harmonic_ratio = float(np.mean([r["harmonic_ratio"] for r in results]))
-    spectral_flatness = float(np.mean([r["spectral_flatness"] for r in results]))
-    spectral_centroid = float(np.mean([r["spectral_centroid"] for r in results]))
-    spectral_rolloff = float(np.mean([r["spectral_rolloff"] for r in results]))
-    high_freq_ratio = float(np.mean([r["high_freq_ratio"] for r in results]))
-    piano_band_ratio = float(np.mean([r["piano_band_ratio"] for r in results]))
-    rms_db = float(np.mean([r["rms_db"] for r in results]))
+    slice_results = [_analyze_acoustics_slice(s, sr, min_gap) for s in slices]
+    picked_per_sec = float(np.mean([r["picked_per_sec"] for r in slice_results]))
+    duo_gain = max(r["duo_gain"] for r in slice_results)
+    harmonic_ratio = float(np.mean([r["harmonic_ratio"] for r in slice_results]))
+    spectral_flatness = float(np.mean([r["spectral_flatness"] for r in slice_results]))
+    spectral_centroid = float(np.mean([r["spectral_centroid"] for r in slice_results]))
+    spectral_rolloff = float(np.mean([r["spectral_rolloff"] for r in slice_results]))
+    high_freq_ratio = float(np.mean([r["high_freq_ratio"] for r in slice_results]))
+    piano_band_ratio = float(np.mean([r["piano_band_ratio"] for r in slice_results]))
 
     piano_score = compute_piano_score(
         harmonic_ratio=harmonic_ratio,
@@ -583,22 +644,30 @@ def assess_audio_file(
     )
     pace_score = compute_pace_score(
         onsets_per_sec=onsets_per_sec,
-        peak_onsets_per_sec=peak_onsets_per_sec,
+        p90_onsets_per_sec=p90_onsets,
         median_ioi=median_ioi,
         fast_frac=fast_frac,
+        sensitive_onsets_per_sec=sen_avg,
+        sensitive_p90_onsets_per_sec=sen_p90,
+        sensitive_median_ioi=sen_med_ioi,
         duo_gain=duo_gain,
     )
 
     return AudioAssessment(
-        sample_duration=round(sample_duration, 2),
-        windows_analyzed=len(results),
-        total_onsets=total_onsets,
+        sample_duration=round(total_dur, 2),
+        windows_analyzed=len(slice_results),
+        total_onsets=int(len(t_std)),
         onsets_per_sec=round(onsets_per_sec, 3),
-        peak_onsets_per_sec=round(peak_onsets_per_sec, 3),
+        p90_onsets_per_sec=round(p90_onsets, 3),
+        peak_onsets_per_sec=round(peak_onsets, 3),
         picked_per_sec=round(picked_per_sec, 3),
         median_ioi=round(median_ioi, 4),
         p25_ioi=round(p25_ioi, 4),
         fast_frac=round(fast_frac, 4),
+        sensitive_onsets_per_sec=round(sen_avg, 3),
+        sensitive_p90_onsets_per_sec=round(sen_p90, 3),
+        sensitive_median_ioi=round(sen_med_ioi, 4),
+        sensitive_fast_frac=round(sen_fast_frac, 4),
         duo_gain=round(duo_gain, 3),
         tempo=round(tempo, 2),
         harmonic_ratio=round(harmonic_ratio, 4),
@@ -626,6 +695,10 @@ def evaluate_audio_criteria(assessment: AudioAssessment, criteria: DiscoveryCrit
         reasons.append(
             f"pace too fast ({assessment.onsets_per_sec:.2f}/s > {criteria.max_onsets_per_sec:.2f}/s)"
         )
+    if assessment.p90_onsets_per_sec > criteria.max_p90_onsets_per_sec:
+        reasons.append(
+            f"busy sections too fast (p90 {assessment.p90_onsets_per_sec:.2f}/s > {criteria.max_p90_onsets_per_sec:.2f}/s)"
+        )
     if assessment.peak_onsets_per_sec > criteria.max_peak_onsets_per_sec:
         reasons.append(
             f"peak section too fast ({assessment.peak_onsets_per_sec:.2f}/s > {criteria.max_peak_onsets_per_sec:.2f}/s)"
@@ -636,7 +709,19 @@ def evaluate_audio_criteria(assessment: AudioAssessment, criteria: DiscoveryCrit
         )
     if assessment.fast_frac > criteria.max_fast_frac:
         reasons.append(
-            f"too many rapid bursts ({assessment.fast_frac * 100:.0f}% > {criteria.max_fast_frac * 100:.0f}%)"
+            f"too many rapid notes ({assessment.fast_frac * 100:.0f}% < {criteria.fast_ioi_threshold:.2f}s > {criteria.max_fast_frac * 100:.0f}%)"
+        )
+    if assessment.sensitive_onsets_per_sec > criteria.max_sensitive_onsets_per_sec:
+        reasons.append(
+            f"dense arpeggios/notes ({assessment.sensitive_onsets_per_sec:.2f}/s > {criteria.max_sensitive_onsets_per_sec:.2f}/s)"
+        )
+    if assessment.sensitive_p90_onsets_per_sec > criteria.max_sensitive_p90_onsets_per_sec:
+        reasons.append(
+            f"dense chorus/climax (sensitive p90 {assessment.sensitive_p90_onsets_per_sec:.2f}/s > {criteria.max_sensitive_p90_onsets_per_sec:.2f}/s)"
+        )
+    if assessment.sensitive_median_ioi < criteria.min_sensitive_median_ioi:
+        reasons.append(
+            f"rapid inner notes (sensitive median IOI {assessment.sensitive_median_ioi:.3f}s < {criteria.min_sensitive_median_ioi:.3f}s)"
         )
     if assessment.duo_gain > criteria.max_duo_gain:
         reasons.append(
@@ -921,7 +1006,11 @@ def _evaluate_piano_candidate(
         assessment = (
             assessor(wav_path)
             if assessor is not None
-            else assess_audio_file(wav_path, min_gap=criteria.min_gap)
+            else assess_audio_file(
+                wav_path,
+                min_gap=criteria.min_gap,
+                fast_ioi_threshold=criteria.fast_ioi_threshold,
+            )
         )
 
     reasons = evaluate_audio_criteria(assessment, criteria)
@@ -972,7 +1061,7 @@ def discover_tracks(
     catalog = catalog or DiscoveryCatalog()
     client = client or YouTubeClient()
     emit = log or (lambda _msg: None)
-    budget = max_checks if max_checks is not None else max(count * 5, 15)
+    budget = max_checks if max_checks is not None else max(count * 8, 25)
 
     accepted_now: list[EvaluatedTrack] = []
     seen_song_keys = set() if allow_duplicate_songs else set(catalog.accepted_song_keys())
@@ -981,12 +1070,17 @@ def discover_tracks(
     def _can_continue() -> bool:
         return len(accepted_now) < count and checks_done < budget
 
+    def _piano_candidate_rank(c: VideoCandidate) -> tuple[int, int]:
+        # Prefer explicitly slow/easy/lullaby/soft arrangements before dense virtuoso covers
+        has_slow_hint = 1 if _SLOW_PIANO_HINT_RE.search(f"{c.title} {c.channel}") else 0
+        return (-has_slow_hint, -(c.view_count or 0))
+
     def _find_piano_for_song(
         song_label: str,
         *,
         original: VideoCandidate | None,
         run_mode: str,
-        per_song_checks: int = 3,
+        per_song_checks: int = 4,
     ) -> EvaluatedTrack | None:
         nonlocal checks_done
         cleaned = clean_song_title(song_label)
@@ -996,7 +1090,12 @@ def discover_tracks(
         if not allow_duplicate_songs and skey in seen_song_keys:
             return None
 
-        search_queries = [f"{cleaned} piano cover", f"{cleaned} solo piano"]
+        search_queries = [
+            f"{cleaned} slow piano",
+            f"{cleaned} easy piano",
+            f"{cleaned} piano lullaby",
+            f"{cleaned} solo piano",
+        ]
         raw_cands: list[VideoCandidate] = []
         seen_ids: set[str] = set()
         for sq in search_queries:
@@ -1007,7 +1106,7 @@ def discover_tracks(
                     continue
                 seen_ids.add(c.video_id)
                 raw_cands.append(c)
-            if len(raw_cands) >= piano_search_limit:
+            if len(raw_cands) >= piano_search_limit * 2:
                 break
 
         # Fast title + duration pre-screen before metadata enrichment
@@ -1020,14 +1119,15 @@ def discover_tracks(
         if not pre_screened:
             return None
 
-        enriched = client.enrich_candidates(pre_screened[: max(per_song_checks * 2, 5)])
+        # Prioritize slow/easy/lullaby titles before enriching so we spend network calls wisely
+        pre_screened.sort(key=lambda c: 0 if _SLOW_PIANO_HINT_RE.search(f"{c.title} {c.channel}") else 1)
+        enriched = client.enrich_candidates(pre_screened[: max(per_song_checks * 2, 8)])
         passing: list[VideoCandidate] = []
         for c in enriched:
             if not screen_piano_candidate(c, criteria, target_song=cleaned, require_views=True):
                 passing.append(c)
 
-        # Prefer higher-view piano covers with explicit "piano cover" / "solo piano"
-        passing.sort(key=lambda c: -(c.view_count or 0))
+        passing.sort(key=_piano_candidate_rank)
 
         tried_for_song = 0
         for cand in passing:
@@ -1061,7 +1161,8 @@ def discover_tracks(
                 accepted_now.append(track)
                 emit(
                     f"      ACCEPTED (score {track.score:.1f}): "
-                    f"{m.get('onsets_per_sec', 0):.2f} onsets/s, "
+                    f"{m.get('onsets_per_sec', 0):.2f}/s (p90 {m.get('p90_onsets_per_sec', 0):.2f}/s, "
+                    f"sen {m.get('sensitive_onsets_per_sec', 0):.2f}/s), "
                     f"med IOI {m.get('median_ioi', 0):.2f}s, "
                     f"duo {m.get('duo_gain', 0):.2f}x, "
                     f"piano {m.get('piano_score', 0):.2f}"
@@ -1253,9 +1354,18 @@ def format_results_table(tracks: list[EvaluatedTrack]) -> str:
             f"    {t.url}  ({dur_str}, piano views: {format_views(t.view_count)}{orig_str})"
         )
         if m:
+            sen_str = (
+                f", sen {m['sensitive_onsets_per_sec']:.2f}/s (p90 {m.get('sensitive_p90_onsets_per_sec', 0):.2f}/s)"
+                if "sensitive_onsets_per_sec" in m
+                else ""
+            )
+            p90_str = (
+                f"p90 {m['p90_onsets_per_sec']:.2f}/s"
+                if "p90_onsets_per_sec" in m
+                else f"peak {m.get('peak_onsets_per_sec', 0):.2f}/s"
+            )
             lines.append(
-                f"    pace: {m.get('onsets_per_sec', 0):.2f} onsets/s "
-                f"(peak {m.get('peak_onsets_per_sec', 0):.2f}/s), "
+                f"    pace: {m.get('onsets_per_sec', 0):.2f}/s ({p90_str}{sen_str}), "
                 f"med IOI {m.get('median_ioi', 0):.2f}s, "
                 f"fast {m.get('fast_frac', 0) * 100:.0f}%, "
                 f"duo {m.get('duo_gain', 0):.2f}x | "
@@ -1297,46 +1407,70 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--min-piano-views",
         type=int,
-        default=50_000,
-        help="minimum views for piano cover video (default: 50000)",
+        default=20_000,
+        help="minimum views for piano cover video (default: 20000)",
     )
     ap.add_argument("--min-duration", type=float, default=90.0, help="minimum track length in seconds (default: 90)")
     ap.add_argument("--max-duration", type=float, default=420.0, help="maximum track length in seconds (default: 420)")
     ap.add_argument(
         "--max-onsets-per-sec",
         type=float,
-        default=3.6,
-        help="maximum average onsets/second for slow pace (default: 3.6)",
+        default=2.0,
+        help="maximum full-track average onsets/second (default: 2.0)",
+    )
+    ap.add_argument(
+        "--max-p90-onsets-per-sec",
+        type=float,
+        default=2.5,
+        help="maximum 90th-percentile 10s-window onsets/second across the full song (default: 2.5)",
     )
     ap.add_argument(
         "--max-peak-onsets-per-sec",
         type=float,
-        default=4.5,
-        help="maximum peak-window onsets/second (default: 4.5)",
+        default=4.0,
+        help="maximum single 10s-window peak onsets/second (default: 4.0)",
     )
     ap.add_argument(
         "--min-onsets-per-sec",
         type=float,
-        default=0.6,
-        help="minimum average onsets/second to avoid near-silence (default: 0.6)",
+        default=0.5,
+        help="minimum average onsets/second to avoid near-silence (default: 0.5)",
     )
     ap.add_argument(
         "--min-median-ioi",
         type=float,
-        default=0.24,
-        help="minimum median interval between notes in seconds (default: 0.24)",
+        default=0.40,
+        help="minimum median interval between notes in seconds (default: 0.40)",
     )
     ap.add_argument(
         "--max-fast-frac",
         type=float,
-        default=0.18,
-        help="maximum fraction of note intervals faster than min-gap (default: 0.18)",
+        default=0.20,
+        help="maximum fraction of note intervals shorter than 0.25s (default: 0.20)",
+    )
+    ap.add_argument(
+        "--max-sensitive-onsets-per-sec",
+        type=float,
+        default=2.5,
+        help="maximum sensitive-detector onsets/sec to catch pedal-blurred arpeggios (default: 2.5)",
+    )
+    ap.add_argument(
+        "--max-sensitive-p90-onsets-per-sec",
+        type=float,
+        default=3.2,
+        help="maximum 90th-percentile sensitive onsets/sec in busy sections (default: 3.2)",
+    )
+    ap.add_argument(
+        "--min-sensitive-median-ioi",
+        type=float,
+        default=0.32,
+        help="minimum sensitive-detector median interval between notes in seconds (default: 0.32)",
     )
     ap.add_argument(
         "--max-duo-gain",
         type=float,
-        default=1.25,
-        help="maximum two-ball gain (below 1.3 keeps clean 1-ball pacing; default: 1.25)",
+        default=1.20,
+        help="maximum two-ball gain (below 1.3 keeps clean 1-ball pacing; default: 1.20)",
     )
     ap.add_argument(
         "--min-piano-score",
@@ -1386,9 +1520,13 @@ def main(argv: list[str] | None = None) -> None:
             max_duration=args.max_duration,
             min_onsets_per_sec=args.min_onsets_per_sec,
             max_onsets_per_sec=args.max_onsets_per_sec,
+            max_p90_onsets_per_sec=args.max_p90_onsets_per_sec,
             max_peak_onsets_per_sec=args.max_peak_onsets_per_sec,
             min_median_ioi=args.min_median_ioi,
             max_fast_frac=args.max_fast_frac,
+            max_sensitive_onsets_per_sec=args.max_sensitive_onsets_per_sec,
+            max_sensitive_p90_onsets_per_sec=args.max_sensitive_p90_onsets_per_sec,
+            min_sensitive_median_ioi=args.min_sensitive_median_ioi,
             max_duo_gain=args.max_duo_gain,
             min_piano_score=args.min_piano_score,
             min_gap=args.min_gap,

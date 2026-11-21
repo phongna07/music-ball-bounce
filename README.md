@@ -52,10 +52,12 @@ Key discovery options:
 | `--query "..."` | Custom YouTube search query (repeatable; omit to use the built-in curated hits pool) |
 | `--song "..."` | Specific song title or YouTube URL to find a slow piano version for (repeatable) |
 | `--min-original-views 50000000` | Minimum views on the original hit music video |
-| `--min-piano-views 50000` | Minimum views on the piano cover video |
-| `--max-onsets-per-sec 3.6` | Maximum average note density (lower = slower pace) |
-| `--min-median-ioi 0.24` | Minimum median gap between notes, in seconds |
-| `--max-duo-gain 1.25` | Keeps single-ball pacing (below the 1.3 two-ball threshold) |
+| `--min-piano-views 20000` | Minimum views on the piano cover video |
+| `--max-onsets-per-sec 2.0` | Maximum full-track average note density (lower = slower pace) |
+| `--max-p90-onsets-per-sec 2.5` | Maximum 90th-percentile 10s-window density (catches busy choruses) |
+| `--max-sensitive-onsets-per-sec 2.5` | Sensitive onset cap that catches pedal-blurred fast arpeggios |
+| `--min-median-ioi 0.40` | Minimum median gap between notes, in seconds |
+| `--max-duo-gain 1.20` | Keeps clean single-ball pacing (below the 1.3 two-ball threshold) |
 | `--min-piano-score 0.65` | Minimum acoustic piano purity score (0–1) |
 | `--list` / `--unused-only` | List saved tracks from `work/discover/catalog.json` |
 | `--download` / `--render` | Download full MP3s to `work/youtube/` or run `mbb.py` on each winner |
