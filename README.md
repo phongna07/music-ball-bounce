@@ -1,12 +1,14 @@
 # Music Ball Bounce
 
-Turns a music file into a 1080×1920, 60 fps video of a ball bouncing down a wall of
+Turns a music file or YouTube URL into a 1080×1920, 60 fps video of a ball bouncing down a wall of
 plates, landing on every note. Everything runs locally.
 
 ## Make a video
 
 ```bash
 uv run --project pipeline python pipeline/mbb.py path/to/song.mp3
+# or directly from a YouTube URL (downloads and caches the .mp3 in work/youtube/):
+uv run --project pipeline python pipeline/mbb.py "https://youtu.be/VIDEO_ID"
 ```
 
 The video is written to `out/<song>.mp4`. Useful options:
@@ -18,6 +20,7 @@ The video is written to `out/<song>.mp4`. Useful options:
 | `--min-gap 0.17` | Shortest time between bounces, in seconds. Raise it for fewer bounces |
 | `--balls auto\|1\|2` | Number of balls. `auto` (default) switches to two balls side by side when the rhythm is too fast for one |
 | `--offset -0.023` | Shift every bounce earlier or later, in seconds |
+| `--redownload` | Re-download the `.mp3` even if this YouTube URL is already cached |
 | `--no-render` | Stop after choreography, then preview with `npm run dev` |
 | `--frames 0-299` | Render only part of the video |
 | `--scale 0.5` | Render at half size for a quick draft |
@@ -101,6 +104,7 @@ Remotion Studio opens the most recently processed song with audio and a scrubber
 
 ## How it works
 
+0. **Download** (`pipeline/youtube.py`, when given a YouTube URL): fetches audio with `yt-dlp` and extracts an `.mp3` cached under `work/youtube/<video-id>/`.
 1. **Decode** (`ffmpeg`): any input becomes `public/songs/<song>/audio.wav`.
 2. **Analyse** (`pipeline/analyze.py`): onsets, pitch, beats, kicks, sections and
    energy curves, cached in `work/<song>/analysis.json`.
