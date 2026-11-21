@@ -39,7 +39,11 @@ def main() -> None:
     ap.add_argument("--no-render", action="store_true", help="stop after choreography (use Studio to preview)")
     ap.add_argument("--frames", help="render only this frame range, e.g. 0-299")
     ap.add_argument("--scale", type=float, default=1.0, help="output scale, 0.5 renders 540x960")
-    ap.add_argument("--concurrency", help="parallel browser tabs for the render")
+    ap.add_argument("--renderer", choices=["gpu", "cpu"], help="render mode: gpu (default Remotion) or cpu (multi-browser SwiftShader)")
+    ap.add_argument("--gl", help="OpenGL backend override (e.g. angle, swangle, egl, vulkan)")
+    ap.add_argument("--concurrency", help="parallel browser tabs for GPU render")
+    ap.add_argument("--workers", help="parallel browsers for CPU render (default: sized to free CPU and RAM)")
+    ap.add_argument("--tabs", help="tabs per browser for CPU render (default 1)")
     ap.add_argument("--out", type=Path, help="output mp4 path")
     args = ap.parse_args()
 
@@ -102,14 +106,22 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     props = work_dir / "props.json"
     props.write_text(json.dumps({"song": slug}))
-    cmd = ["npx", "remotion", "render", "Bounce", str(out), f"--props={props}", f"--scale={args.scale}"]
+    cmd = ["node", "scripts/render.mjs", str(out), f"--props={props}", f"--scale={args.scale}"]
     if args.frames:
         cmd.append(f"--frames={args.frames}")
+    if args.renderer:
+        cmd.append(f"--renderer={args.renderer}")
+    if args.gl:
+        cmd.append(f"--gl={args.gl}")
     if args.concurrency:
         cmd.append(f"--concurrency={args.concurrency}")
+    if args.workers:
+        cmd.append(f"--workers={args.workers}")
+    if args.tabs:
+        cmd.append(f"--tabs={args.tabs}")
     print("[4/4] rendering")
     t0 = time.time()
-    subprocess.run(cmd, cwd=ROOT, check=True, shell=(sys.platform == "win32"))
+    subprocess.run(cmd, cwd=ROOT, check=True)
     print(f"Done in {time.time() - t0:.0f}s: {out}")
 
 

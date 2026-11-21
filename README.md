@@ -20,6 +20,75 @@ The video is written to `out/<song>.mp4`. Useful options:
 | `--no-render` | Stop after choreography, then preview with `npm run dev` |
 | `--frames 0-299` | Render only part of the video |
 | `--scale 0.5` | Render at half size for a quick draft |
+| `--renderer gpu\|cpu` | Override render mode (`gpu` = default Remotion CLI, `cpu` = multi-browser SwiftShader) |
+| `--gl angle\|swangle\|...` | Override the Chromium OpenGL backend |
+| `--concurrency 4` | Parallel browser tabs for `gpu` mode |
+| `--workers 8` | Parallel browsers for `cpu` mode (default: sized to free CPU and RAM) |
+
+## GPU vs. CPU rendering
+
+By default, rendering uses **`gpu`** mode (standard single-browser `remotion render` with
+hardware ANGLE WebGL). On headless or GPU-less machines, switch to **`cpu`** mode, which
+rasterises WebGL in software via SwiftShader (`--gl=swangle`) across multiple parallel
+Chrome browsers (`scripts/render.mjs`).
+
+You can configure which machine uses `gpu` vs. `cpu` in any of these ways (highest
+precedence first):
+
+1. **Per-run CLI flag**: `--renderer gpu` or `--renderer cpu` (on `mbb.py` or `npm run render`).
+2. **Environment variable**: `MBB_RENDERER=cpu` (or `gpu`), plus optional `MBB_GL`,
+   `MBB_CONCURRENCY`, `MBB_WORKERS`, `MBB_TABS`, etc.
+3. **Per-machine `.env` file** (gitignored — see `.env.example`):
+   ```bash
+   echo "MBB_RENDERER=cpu" > .env
+   ```
+4. **Shared hostname map in `render.config.json`**: map each machine's hostname (exact,
+   short name, or `*` wildcard) to `"gpu"`, `"cpu"`, or a settings object:
+   ```json
+   {
+     "default": "gpu",
+     "machines": {
+       "cpu-server-*": "cpu",
+       "my-big-box": { "renderer": "cpu", "workers": 12, "reserveMemMb": 4096 },
+       "my-workstation": { "renderer": "gpu", "gl": "angle", "concurrency": 4 }
+     }
+   }
+   ```
+
+Inspect what a machine will use without rendering:
+
+```bash
+npm run render -- --show-config
+```
+
+`mbb.py`, `npm run render`, `npx remotion render`, and `npm run dev` all read the same
+configuration (`scripts/config.mjs`). `scripts/render.mjs` can also be run on its own:
+
+```bash
+npm run render -- out/song.mp4 --props='{"song":"song"}' [--renderer=gpu|cpu] [--frames=0-299] [--scale=0.5]
+```
+
+### How multi-browser CPU rendering works
+
+A Chrome browser draws all its tabs through one GPU process, which keeps only about four
+cores busy under SwiftShader, so `cpu` mode runs several browsers at once, each on its own
+chunk of frames, then joins the chunks and adds the soundtrack with `ffmpeg`.
+
+The number of browsers is chosen at start-up from what the machine has free right then:
+
+- **CPU**: usable cores (CPU affinity and any container quota) / 4 cores per browser.
+- **RAM**: (MemAvailable, capped by any container limit, minus 4 GB kept free) / ~1.3 GB
+  per browser at full size, less when `--scale` is below 1.
+
+The lower of the two wins, and the first line of the render log says which. On a 48-core,
+48 GB machine that is 12 browsers at about 6.6 frames per second (one browser alone does
+about 1.2) with a peak of about 12 GB. Each browser's x264 encoder is held to its share
+of the cores; left alone, every encoder starts threads for all of them and buffers about
+1 GB.
+
+Every figure can be overridden via environment variables, `.env`, or `render.config.json`:
+`MBB_WORKERS`, `MBB_TABS`, `MBB_CORES_PER_WORKER`, `MBB_BROWSER_MEM_MB`, `MBB_TAB_MEM_MB`,
+`MBB_RESERVE_MEM_MB`, and `MBB_GL`.
 
 ## Preview and tweak the look
 
@@ -40,7 +109,7 @@ Remotion Studio opens the most recently processed song with audio and a scrubber
    next arc. A fine-step check then confirms no arc touches a plate it should not.
    Output: `public/songs/<song>/choreo.json`.
 4. **Render** (`src/`): a Three.js scene in Remotion where every frame is a pure
-   function of time, so frames can render in parallel and stay in sync.
+   function of time, so frames can render in parallel (in separate browsers) and stay in sync.
 
 The look lives in `src/scene/Scene.tsx` (plates, ball, lights, camera),
 `src/scene/Wall.tsx` and `src/scene/Effects.tsx` (bloom, tone mapping, grain).

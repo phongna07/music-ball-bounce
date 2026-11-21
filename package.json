@@ -11,8 +11,10 @@
   "dependencies": {
     "@react-three/fiber": "^9.8.2",
     "@react-three/postprocessing": "^3.2.2",
+    "@remotion/bundler": "4.0.544",
     "@remotion/cli": "4.0.544",
     "@remotion/media": "4.0.544",
+    "@remotion/renderer": "4.0.544",
     "@remotion/three": "4.0.544",
     "postprocessing": "^6.39.6",
     "react": "19.3.1",
@@ -33,7 +35,8 @@
     "dev": "remotion studio",
     "build": "remotion bundle",
     "upgrade": "remotion upgrade",
-    "lint": "eslint src && tsc"
+    "lint": "eslint src && tsc",
+    "render": "node scripts/render.mjs"
   },
   "allowScripts": {
     "esbuild": false
