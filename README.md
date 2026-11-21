@@ -9,7 +9,62 @@ plates, landing on every note. Everything runs locally.
 uv run --project pipeline python pipeline/mbb.py path/to/song.mp3
 # or directly from a YouTube URL (downloads and caches the .mp3 in work/youtube/):
 uv run --project pipeline python pipeline/mbb.py "https://youtu.be/VIDEO_ID"
+# or automatically find a popular slow piano track and make a video:
+uv run --project pipeline python pipeline/mbb.py --discover
 ```
+
+## Auto-discover slow piano tracks
+
+Instead of hunting YouTube manually, `pipeline/discover.py` systematically searches for popular
+music videos (high views — current or classic hits), finds their piano versions, downloads a
+fast low-bandwidth preview, and verifies both **piano acoustics** (spectral purity, harmonicity,
+low harsh high-frequency energy) and **slow rhythm pace** (onset density, median note spacing,
+and single-ball `duo_gain` matching `choreograph.py`).
+
+```bash
+# Find 5 popular songs with verified slow piano covers (saved to work/discover/catalog.json)
+uv run --project pipeline python pipeline/discover.py --count 5
+
+# Search a specific era, genre, or mood
+uv run --project pipeline python pipeline/discover.py --query "2010s pop ballads" --count 5
+
+# Find & verify the best slow piano version for specific song(s) or a YouTube music video URL
+uv run --project pipeline python pipeline/discover.py --song "Adele - Someone Like You"
+uv run --project pipeline python pipeline/discover.py --song "https://www.youtube.com/watch?v=RgKAFK5djSk"
+
+# Search single-track piano covers directly (instead of popular-original -> piano cover)
+uv run --project pipeline python pipeline/discover.py --mode direct-piano --min-piano-views 500000
+
+# View previously discovered qualifying tracks without hitting YouTube
+uv run --project pipeline python pipeline/discover.py --list --unused-only
+
+# Discover, download MP3s, or render directly into videos
+uv run --project pipeline python pipeline/discover.py --count 3 --download
+uv run --project pipeline python pipeline/discover.py --count 1 --render
+```
+
+Key discovery options:
+
+| Option | Effect |
+|---|---|
+| `--mode popular-to-piano\|direct-piano\|both` | Strategy: find high-view originals then match piano covers (default), search piano tracks directly, or both |
+| `--count 5` | Target number of verified tracks to collect |
+| `--query "..."` | Custom YouTube search query (repeatable; omit to use the built-in curated hits pool) |
+| `--song "..."` | Specific song title or YouTube URL to find a slow piano version for (repeatable) |
+| `--min-original-views 50000000` | Minimum views on the original hit music video |
+| `--min-piano-views 50000` | Minimum views on the piano cover video |
+| `--max-onsets-per-sec 3.6` | Maximum average note density (lower = slower pace) |
+| `--min-median-ioi 0.24` | Minimum median gap between notes, in seconds |
+| `--max-duo-gain 1.25` | Keeps single-ball pacing (below the 1.3 two-ball threshold) |
+| `--min-piano-score 0.65` | Minimum acoustic piano purity score (0–1) |
+| `--list` / `--unused-only` | List saved tracks from `work/discover/catalog.json` |
+| `--download` / `--render` | Download full MP3s to `work/youtube/` or run `mbb.py` on each winner |
+| `--json` / `--export-urls file.txt` | Machine-readable output for batch scripts |
+
+Evaluated tracks and originals are saved in `work/discover/catalog.json`, so repeated runs
+automatically skip already-checked songs and keep exploring fresh hits. Passing `--discover`
+to `pipeline/mbb.py` picks the highest-scoring unused track from the catalog (or runs a fresh
+search if none is left) and marks it used once processed.
 
 The video is written to `out/<song>.mp4`. Useful options:
 

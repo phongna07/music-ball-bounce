@@ -2,8 +2,9 @@
 
     uv run --project pipeline python pipeline/mbb.py path/to/song.mp3
     uv run --project pipeline python pipeline/mbb.py "https://youtu.be/VIDEO_ID"
+    uv run --project pipeline python pipeline/mbb.py --discover
 
-Stages: [youtube mp3 ->] decode -> analyse (cached) -> choreograph + verify -> render.
+Stages: [discover ->] [youtube mp3 ->] decode -> analyse (cached) -> choreograph + verify -> render.
 """
 
 from __future__ import annotations
@@ -31,7 +32,17 @@ def sha1(path: Path) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("input", help="music/video file (anything ffmpeg can decode) or YouTube URL")
+    ap.add_argument("input", nargs="?", help="music/video file (anything ffmpeg can decode) or YouTube URL")
+    ap.add_argument("--discover", action="store_true",
+                    help="automatically pick (or search for) a popular slow piano track from YouTube")
+    ap.add_argument("--discover-query", action="append", dest="discover_queries",
+                    help="custom YouTube search query for --discover (repeatable)")
+    ap.add_argument("--discover-song", action="append", dest="discover_songs",
+                    help="specific song title or YouTube URL to find a slow piano version for")
+    ap.add_argument("--discover-mode", choices=["popular-to-piano", "direct-piano", "both"],
+                    default="popular-to-piano", help="discovery strategy for --discover")
+    ap.add_argument("--discover-fresh", action="store_true",
+                    help="run a fresh YouTube search instead of picking an unused track from the catalog")
     ap.add_argument("--seed", type=int, default=1, help="different seeds give different layouts")
     ap.add_argument("--palette", default="neon", choices=["neon", "sunset", "ice"])
     ap.add_argument("--min-gap", type=float, default=0.17, help="shortest time between bounces, seconds")
@@ -51,6 +62,39 @@ def main() -> None:
     ap.add_argument("--tabs", help="tabs per browser for CPU render (default 1)")
     ap.add_argument("--out", type=Path, help="output mp4 path")
     args = ap.parse_args()
+
+    discovered_id: str | None = None
+    catalog = None
+    if args.discover or args.discover_queries or args.discover_songs:
+        if args.input:
+            sys.exit("Pass either an input path/URL or --discover, not both.")
+        from discover import DEFAULT_CATALOG_PATH, DiscoveryCatalog, DiscoveryCriteria, discover_tracks
+
+        catalog = DiscoveryCatalog(DEFAULT_CATALOG_PATH)
+        chosen = None
+        if not args.discover_fresh and not args.discover_queries and not args.discover_songs:
+            unused = catalog.list_tracks(unused_only=True)
+            if unused:
+                chosen = unused[0]
+                print(f"[discover] using catalog track: {chosen.title} (score {chosen.score:.1f})")
+        if chosen is None:
+            print("[discover] searching YouTube for a popular slow piano track...")
+            found = discover_tracks(
+                count=1,
+                mode=args.discover_mode,
+                queries=args.discover_queries,
+                songs=args.discover_songs,
+                criteria=DiscoveryCriteria(min_gap=args.min_gap),
+                catalog=catalog,
+            )
+            if not found:
+                sys.exit("No qualifying slow piano track found. Try relaxing thresholds in pipeline/discover.py.")
+            chosen = found[0]
+            print(f"[discover] selected: {chosen.title} (score {chosen.score:.1f}) -> {chosen.url}")
+        args.input = chosen.url
+        discovered_id = chosen.video_id
+    elif not args.input:
+        ap.error("provide an input audio/video file, a YouTube URL, or --discover")
 
     is_yt = is_youtube_url(args.input)
     steps = 5 if is_yt else 4
@@ -131,6 +175,8 @@ def main() -> None:
     step += 1
 
     if args.no_render:
+        if discovered_id and catalog is not None:
+            catalog.mark_used(discovered_id)
         print(f"Done. Preview with: npm run dev   (song: {slug})")
         return
 
@@ -155,6 +201,8 @@ def main() -> None:
     print(f"[{step}/{steps}] rendering")
     t0 = time.time()
     subprocess.run(cmd, cwd=ROOT, check=True)
+    if discovered_id and catalog is not None:
+        catalog.mark_used(discovered_id)
     print(f"Done in {time.time() - t0:.0f}s: {out}")
 
 
