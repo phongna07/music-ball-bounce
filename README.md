@@ -16,6 +16,7 @@ The video is written to `out/<song>.mp4`. Useful options:
 | `--seed 2` | A different plate layout for the same song |
 | `--palette neon\|sunset\|ice` | Plate colours |
 | `--min-gap 0.17` | Shortest time between bounces, in seconds. Raise it for fewer bounces |
+| `--balls auto\|1\|2` | Number of balls. `auto` (default) switches to two balls side by side when the rhythm is too fast for one |
 | `--offset -0.023` | Shift every bounce earlier or later, in seconds |
 | `--no-render` | Stop after choreography, then preview with `npm run dev` |
 | `--frames 0-299` | Render only part of the video |
@@ -108,6 +109,15 @@ Remotion Studio opens the most recently processed song with audio and a scrubber
    closed-form parabola and each plate is tilted so the reflection produces the
    next arc. A fine-step check then confirms no arc touches a plate it should not.
    Output: `public/songs/<song>/choreo.json`.
+
+   **Two balls.** The notes are also picked at half the minimum gap and dealt out to
+   two balls, each still keeping the full gap between its own bounces. A note goes to
+   the ball that has waited longer, with low pitches leaning left and high pitches
+   leaning right. If two balls would catch at least 30% more of the music (weighted
+   by onset strength) than one, `auto` uses two. Each ball is solved in its own lane
+   (nothing crosses the centre line) and follows a shared descent line, so the two
+   stay level on screen. Verification also checks each ball against the other
+   ball's plates and checks that the balls never touch.
 4. **Render** (`src/`): a Three.js scene in Remotion where every frame is a pure
    function of time, so frames can render in parallel (in separate browsers) and stay in sync.
 

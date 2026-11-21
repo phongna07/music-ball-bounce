@@ -15,7 +15,12 @@ export type Plate = {
   color: string;
   strength: number;
   speed: number;
+  /** Which ball lands on this plate (version 2+). */
+  ball?: number;
 };
+
+/** One ball: its flight segments, and for each of its hits the index into `Choreo.plates`. */
+export type BallPath = { segments: Segment[]; plates: number[] };
 
 export type Choreo = {
   version: number;
@@ -24,9 +29,11 @@ export type Choreo = {
   gravity: number;
   ballRadius: number;
   plateThickness: number;
-  segments: Segment[];
+  /** One entry per ball (one or two). Older files only have `segments`; see normalizeChoreo. */
+  balls: BallPath[];
+  /** Every ball's plates, sorted by hit time. */
   plates: Plate[];
-  camera: { fps: number; x: number[]; y: number[] };
+  camera: { fps: number; x: number[]; y: number[]; dist?: number };
   kicks: { t: number; strength: number }[];
   beats: number[];
   energy: { fps: number; rms: number[]; low: number[]; high: number[] };
@@ -52,18 +59,25 @@ export const lastIndexAtOrBefore = <T>(items: T[], t: number, time: (item: T) =>
   return found;
 };
 
-export const ballAt = (c: Choreo, t: number) => {
-  const first = c.segments[0];
-  const i = Math.max(0, lastIndexAtOrBefore(c.segments, t, (s) => s.t0));
-  const s = c.segments[i];
+/** Accepts version 1 files (a single top-level `segments` list) as one ball. */
+export const normalizeChoreo = (raw: Choreo & { segments?: Segment[] }): Choreo => {
+  if (raw.balls && raw.balls.length > 0) return raw;
+  return { ...raw, balls: [{ segments: raw.segments ?? [], plates: raw.plates.map((_, i) => i) }] };
+};
+
+export const ballAt = (c: Choreo, t: number, ball = 0) => {
+  const path = c.balls[ball];
+  const first = path.segments[0];
+  const i = Math.max(0, lastIndexAtOrBefore(path.segments, t, (s) => s.t0));
+  const s = path.segments[i];
   const tau = Math.max(t, first.t0) - s.t0;
   return {
     x: s.x + s.vx * tau,
     y: s.y + s.vy * tau - 0.5 * c.gravity * tau * tau,
     vx: s.vx,
     vy: s.vy - c.gravity * tau,
-    // segment i starts at plate i-1
-    lastPlate: i - 1,
+    // segment i starts at this ball's hit i-1; mapped to an index into c.plates (-1 before the first hit)
+    lastPlate: i >= 1 ? path.plates[i - 1] : -1,
   };
 };
 

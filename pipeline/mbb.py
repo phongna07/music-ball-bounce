@@ -36,6 +36,8 @@ def main() -> None:
     ap.add_argument("--max-gap", type=float, default=1.3, help="longest silence before a beat is used instead")
     # -0.023 cancels the lag of the coarse onset frames in analyze.py (measured with check_sync.py)
     ap.add_argument("--offset", type=float, default=-0.023, help="shift every bounce by this many seconds")
+    ap.add_argument("--balls", default="auto", choices=["auto", "1", "2"],
+                    help="number of balls; auto uses two side by side when the rhythm is too fast for one")
     ap.add_argument("--no-render", action="store_true", help="stop after choreography (use Studio to preview)")
     ap.add_argument("--frames", help="render only this frame range, e.g. 0-299")
     ap.add_argument("--scale", type=float, default=1.0, help="output scale, 0.5 renders 540x960")
@@ -91,9 +93,11 @@ def main() -> None:
     from choreograph import choreograph
 
     choreo = choreograph(analysis, seed=args.seed, palette=args.palette, min_gap=args.min_gap,
-                         max_gap=args.max_gap, offset=args.offset)
+                         max_gap=args.max_gap, offset=args.offset, balls=args.balls)
     (song_dir / "choreo.json").write_text(json.dumps(choreo, separators=(",", ":")))
     r = choreo["report"]
+    why = "auto" if args.balls == "auto" else "forced"
+    print(f"      {r['balls']} ball(s) ({why}; two balls would catch {r['duo_gain']:.2f}x the notes of one)")
     print(f"      {len(choreo['plates'])} bounces verified, {r['dropped_notes']} dropped, {time.time() - t0:.1f}s")
     (ROOT / "public" / "songs" / "latest.json").write_text(json.dumps({"song": slug}))
 

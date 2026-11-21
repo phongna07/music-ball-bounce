@@ -1,7 +1,7 @@
 import React from "react";
 import { CalculateMetadataFunction, Composition, staticFile } from "remotion";
 import { Bounce, BounceProps } from "./Bounce";
-import type { Choreo } from "./choreo";
+import { Choreo, normalizeChoreo } from "./choreo";
 
 const FPS = 60;
 
@@ -14,7 +14,7 @@ const calculateMetadata: CalculateMetadataFunction<BounceProps> = async ({ props
   }
   const res = await fetch(staticFile(`songs/${song}/choreo.json`), { signal: abortSignal });
   if (!res.ok) throw new Error(`No choreography for "${song}". Run pipeline/mbb.py on it first.`);
-  const choreo: Choreo = await res.json();
+  const choreo: Choreo = normalizeChoreo(await res.json());
   return {
     durationInFrames: Math.max(1, Math.floor(choreo.duration * FPS)),
     props: { ...props, song, choreo },

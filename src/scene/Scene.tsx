@@ -26,7 +26,13 @@ const WHITE = new THREE.Color("#ffffff");
 const UNLIT = new THREE.Color("#0c0c0f");
 
 // ---------------------------------------------------------------- camera
-const CameraRig: React.FC<{ x: number; y: number; pulse: number; aspect: number }> = ({ x, y, pulse, aspect }) => {
+const CameraRig: React.FC<{ x: number; y: number; pulse: number; aspect: number; dist: number }> = ({
+  x,
+  y,
+  pulse,
+  aspect,
+  dist,
+}) => {
   const camera = useThree((s) => s.camera) as THREE.PerspectiveCamera;
   useLayoutEffect(() => {
     camera.fov = 38;
@@ -34,12 +40,12 @@ const CameraRig: React.FC<{ x: number; y: number; pulse: number; aspect: number 
     camera.near = 1;
     camera.far = 120;
     // Looking slightly up and across the wall shows the depth of the plates.
-    camera.position.set(x + 2.6, y + 5.5, 25.5 - 0.7 * pulse);
+    camera.position.set(x + 2.6, y + 5.5, dist - 0.7 * pulse);
     camera.up.set(0, 1, 0);
     camera.lookAt(x, y - 2.2, 0);
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld();
-  }, [camera, x, y, pulse, aspect]);
+  }, [camera, x, y, pulse, aspect, dist]);
   return null;
 };
 
@@ -143,7 +149,7 @@ const Shockwave: React.FC<{ plate: Plate; t: number }> = ({ plate, t }) => {
 };
 
 // ---------------------------------------------------------------- ball
-const Trail: React.FC<{ choreo: Choreo; t: number }> = ({ choreo, t }) => {
+const Trail: React.FC<{ choreo: Choreo; t: number; ball: number }> = ({ choreo, t, ball }) => {
   const geometry = useMemo(() => {
     const positions: number[] = [];
     const colors: number[] = [];
@@ -151,7 +157,7 @@ const Trail: React.FC<{ choreo: Choreo; t: number }> = ({ choreo, t }) => {
     const tint = new THREE.Color();
     for (let i = 0; i < TRAIL_SAMPLES; i++) {
       const k = i / (TRAIL_SAMPLES - 1);
-      const b = ballAt(choreo, t - k * TRAIL_SECONDS);
+      const b = ballAt(choreo, t - k * TRAIL_SECONDS, ball);
       const speed = Math.hypot(b.vx, b.vy) || 1;
       const px = -b.vy / speed;
       const py = b.vx / speed;
@@ -170,7 +176,7 @@ const Trail: React.FC<{ choreo: Choreo; t: number }> = ({ choreo, t }) => {
     g.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
     g.setIndex(indices);
     return g;
-  }, [choreo, t]);
+  }, [choreo, t, ball]);
   useLayoutEffect(() => () => geometry.dispose(), [geometry]);
   return (
     <mesh geometry={geometry} frustumCulled={false}>
@@ -186,8 +192,8 @@ const Trail: React.FC<{ choreo: Choreo; t: number }> = ({ choreo, t }) => {
   );
 };
 
-const Ball: React.FC<{ choreo: Choreo; t: number }> = ({ choreo, t }) => {
-  const b = ballAt(choreo, t);
+const Ball: React.FC<{ choreo: Choreo; t: number; ball: number }> = ({ choreo, t, ball }) => {
+  const b = ballAt(choreo, t, ball);
   const last = b.lastPlate >= 0 ? choreo.plates[b.lastPlate] : null;
   const sinceHit = last ? t - last.t : 10;
   const tint = useMemo(() => new THREE.Color(), []);
@@ -210,7 +216,7 @@ const Ball: React.FC<{ choreo: Choreo; t: number }> = ({ choreo, t }) => {
 
   return (
     <>
-      <Trail choreo={choreo} t={t} />
+      <Trail choreo={choreo} t={t} ball={ball} />
       <group position={[b.x, b.y, BALL_Z]} rotation={[0, 0, angle]} scale={[along, across, across]}>
         <mesh castShadow>
           <sphereGeometry args={[choreo.ballRadius, 48, 32]} />
@@ -307,7 +313,7 @@ export const Scene: React.FC<{ choreo: Choreo; t: number; frame: number; aspect:
 
   return (
     <>
-      <CameraRig x={camX} y={camY} pulse={pulse} aspect={aspect} />
+      <CameraRig x={camX} y={camY} pulse={pulse} aspect={aspect} dist={choreo.camera.dist ?? 25.5} />
       <color attach="background" args={["#050506"]} />
       <ambientLight intensity={1.1 + 0.5 * level} color="#b4bcda" />
       <KeyLight x={camX} y={camY} />
@@ -324,7 +330,9 @@ export const Scene: React.FC<{ choreo: Choreo; t: number; frame: number; aspect:
           </React.Fragment>
         ) : null,
       )}
-      <Ball choreo={choreo} t={t} />
+      {choreo.balls.map((_, k) => (
+        <Ball key={k} choreo={choreo} t={t} ball={k} />
+      ))}
       <Effects frame={frame} pulse={pulse} />
     </>
   );
