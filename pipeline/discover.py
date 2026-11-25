@@ -1495,6 +1495,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--download", action="store_true", help="download full MP3s for accepted tracks into work/youtube/")
     ap.add_argument("--render", action="store_true", help="run pipeline/mbb.py on each accepted track")
     ap.add_argument("--no-render", action="store_true", help="when combined with --render, pass --no-render to mbb.py")
+    ap.add_argument("--full", action="store_true", help="when combined with --render, pass --full to mbb.py")
+    ap.add_argument("--synthesize", choices=["auto", "on", "off"], help="when combined with --render, pass --synthesize mode to mbb.py")
+    ap.add_argument("--soundfont", type=Path, help="when combined with --render, pass --soundfont path to mbb.py")
+    ap.add_argument("--clip-min", type=float, help="when combined with --render, pass --clip-min to mbb.py")
+    ap.add_argument("--clip-max", type=float, help="when combined with --render, pass --clip-max to mbb.py")
     ap.add_argument("--export-urls", type=Path, help="write accepted YouTube URLs (one per line) to this file")
     ap.add_argument("--json", action="store_true", dest="as_json", help="output JSON instead of a formatted table")
     ap.add_argument("--quiet", action="store_true", help="suppress progress logs")
@@ -1582,6 +1587,16 @@ def main(argv: list[str] | None = None) -> None:
             cmd = [sys.executable, str(ROOT / "pipeline" / "mbb.py"), t.url]
             if args.no_render:
                 cmd.append("--no-render")
+            if args.full:
+                cmd.append("--full")
+            if args.synthesize:
+                cmd.extend(["--synthesize", args.synthesize])
+            if args.soundfont:
+                cmd.extend(["--soundfont", str(args.soundfont)])
+            if args.clip_min is not None:
+                cmd.extend(["--clip-min", str(args.clip_min)])
+            if args.clip_max is not None:
+                cmd.extend(["--clip-max", str(args.clip_max)])
             subprocess.run(cmd, cwd=ROOT, check=True)
             catalog.mark_used(t.video_id)
 

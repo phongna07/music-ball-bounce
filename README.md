@@ -68,10 +68,20 @@ automatically skip already-checked songs and keep exploring fresh hits. Passing 
 to `pipeline/mbb.py` picks the highest-scoring unused track from the catalog (or runs a fresh
 search if none is left) and marks it used once processed.
 
-The video is written to `out/<song>.mp4`. Useful options:
+The video is written to `out/<song>.mp4`. By default:
+- Every YouTube track is transcribed locally to MIDI (`Transkun v2 ONNX`) and synthesized with **FluidSynth + Salamander Grand Piano V3** (`work/youtube/<id>/synth/`) instead of redistributing the original YouTube audio.
+- Tracks longer than 60 seconds are automatically trimmed to the strongest **35–60s musical highlight clip** (chorus/climax with an immediate opening hook and smooth fade-in/fade-out; pass `--full` to disable).
+
+Useful options:
 
 | Option | Effect |
 |---|---|
+| `--full` | Render the full song instead of auto-selecting a 35–60s highlight clip |
+| `--clip-min 35` / `--clip-max 60` | Highlight clip length bounds in seconds (target `--clip-target`, default `45`) |
+| `--clip-start 95.0` | Override highlight selection with a manual clip start time in seconds |
+| `--synthesize auto\|on\|off` | Local MIDI→piano synthesis (`auto` = all YouTube inputs, `on` = local files too, `off` = raw audio) |
+| `--soundfont path/to/piano.sf2` | Use a custom SoundFont instead of the auto-downloaded Salamander Grand Piano V3 |
+| `--no-reverb` / `--resynthesize` | Disable FluidSynth reverb or force re-transcription/re-synthesis |
 | `--seed 2` | A different plate layout for the same song |
 | `--palette neon\|sunset\|ice` | Plate colours |
 | `--min-gap 0.17` | Shortest time between bounces, in seconds. Raise it for fewer bounces |
@@ -162,10 +172,11 @@ Remotion Studio opens the most recently processed song with audio and a scrubber
 ## How it works
 
 0. **Download** (`pipeline/youtube.py`, when given a YouTube URL): fetches audio with `yt-dlp` and extracts an `.mp3` cached under `work/youtube/<video-id>/`.
-1. **Decode** (`ffmpeg`): any input becomes `public/songs/<song>/audio.wav`.
-2. **Analyse** (`pipeline/analyze.py`): onsets, pitch, beats, kicks, sections and
+1. **Synthesize piano** (`pipeline/synthesize.py`, default for YouTube tracks): transcribes the audio locally to expressive MIDI (notes, velocities, sustain & soft pedals) via `Transkun v2 ONNX` (`work/models/transkun/`) and renders our own mastered studio piano track with `FluidSynth` + Salamander Grand Piano V3 (`work/soundfonts/`), cached under `work/youtube/<video-id>/synth/`.
+2. **Decode & Highlight Clip** (`ffmpeg` + `pipeline/highlight.py`): prepares 44.1 kHz stereo audio and, by default (`--clip-min 35 --clip-max 60`), scores sections/downbeats/onsets to extract the strongest 35–60s highlight window with raised-cosine fades into `public/songs/<song>/audio.wav` (pass `--full` to keep the full song).
+3. **Analyse** (`pipeline/analyze.py`): onsets, pitch, beats, kicks, sections and
    energy curves, cached in `work/<song>/analysis.json`.
-3. **Choreograph** (`pipeline/choreograph.py`): picks the notes to bounce on, then
+4. **Choreograph** (`pipeline/choreograph.py`): picks the notes to bounce on, then
    solves where each plate goes. The ball is never simulated: each arc is a
    closed-form parabola and each plate is tilted so the reflection produces the
    next arc. A fine-step check then confirms no arc touches a plate it should not.
@@ -179,7 +190,7 @@ Remotion Studio opens the most recently processed song with audio and a scrubber
    (nothing crosses the centre line) and follows a shared descent line, so the two
    stay level on screen. Verification also checks each ball against the other
    ball's plates and checks that the balls never touch.
-4. **Render** (`src/`): a Three.js scene in Remotion where every frame is a pure
+5. **Render** (`src/`): a Three.js scene in Remotion where every frame is a pure
    function of time, so frames can render in parallel (in separate browsers) and stay in sync.
 
 The look lives in `src/scene/Scene.tsx` (plates, ball, lights, camera),
