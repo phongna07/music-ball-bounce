@@ -89,6 +89,8 @@ Useful options:
 | `--offset 0.0` | Optional manual shift for every bounce earlier or later, in seconds |
 | `--no-frame-snap` | Disable snapping bounce times to exact 60 fps video frames |
 | `--balls auto\|1\|2` | Number of balls. `auto` (default) switches to two balls side by side when the rhythm is too fast for one |
+| `--screen-effect both\|splash\|shake\|off` | Screen effect on important music notes: light splash, camera shake, both (default), or off |
+| `--effect-strength 1.0` | Intensity multiplier for important-note screen effects |
 | `--redownload` | Re-download the `.mp3` even if this YouTube URL is already cached |
 | `--no-render` | Stop after choreography, then preview with `npm run dev` |
 | `--frames 0-299` | Render only part of the video |

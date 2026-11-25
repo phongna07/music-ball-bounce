@@ -7,10 +7,13 @@ import {
   HIT_EPS,
   PLATE_DEPTH,
   Plate,
+  ScreenEffectMode,
+  accentEffectsAt,
   ballAt,
   kickPulse,
   lastIndexAtOrBefore,
   mulberry32,
+  resolveScreenEffect,
   sampleCurve,
 } from "../choreo";
 import { Effects } from "./Effects";
@@ -27,13 +30,17 @@ const WHITE = new THREE.Color("#ffffff");
 const UNLIT = new THREE.Color("#0c0c0f");
 
 // ---------------------------------------------------------------- camera
-const CameraRig: React.FC<{ x: number; y: number; pulse: number; aspect: number; dist: number }> = ({
-  x,
-  y,
-  pulse,
-  aspect,
-  dist,
-}) => {
+const CameraRig: React.FC<{
+  x: number;
+  y: number;
+  pulse: number;
+  aspect: number;
+  dist: number;
+  shakeX: number;
+  shakeY: number;
+  shakeZoom: number;
+  shakeRoll: number;
+}> = ({ x, y, pulse, aspect, dist, shakeX, shakeY, shakeZoom, shakeRoll }) => {
   const camera = useThree((s) => s.camera) as THREE.PerspectiveCamera;
   useLayoutEffect(() => {
     camera.fov = 38;
@@ -41,27 +48,33 @@ const CameraRig: React.FC<{ x: number; y: number; pulse: number; aspect: number;
     camera.near = 1;
     camera.far = 120;
     // Looking slightly up and across the wall shows the depth of the plates.
-    camera.position.set(x + 2.6, y + 5.5, dist - 0.7 * pulse);
-    camera.up.set(0, 1, 0);
-    camera.lookAt(x, y - 2.2, 0);
+    camera.position.set(x + 2.6 + shakeX, y + 5.5 + shakeY, dist - 0.7 * pulse - shakeZoom);
+    camera.up.set(Math.sin(shakeRoll), Math.cos(shakeRoll), 0);
+    camera.lookAt(x + shakeX * 0.85, y - 2.2 + shakeY * 0.85, 0);
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld();
-  }, [camera, x, y, pulse, aspect, dist]);
+  }, [camera, x, y, pulse, aspect, dist, shakeX, shakeY, shakeZoom, shakeRoll]);
   return null;
 };
 
 // ---------------------------------------------------------------- plates
-const PlateMesh: React.FC<{ plate: Plate; t: number; thickness: number }> = ({ plate, t, thickness }) => {
+const PlateMesh: React.FC<{ plate: Plate; t: number; thickness: number; accentScale: number }> = ({
+  plate,
+  t,
+  thickness,
+  accentScale,
+}) => {
   const rawTau = t - plate.t;
   const lit = rawTau >= -HIT_EPS;
   const tau = lit ? Math.max(0, rawTau) : rawTau;
   const color = useMemo(() => new THREE.Color(plate.color), [plate.color]);
   const angle = Math.atan2(plate.ny, plate.nx) - Math.PI / 2;
   const hitForce = Math.min(1, plate.speed / 18);
+  const effAccent = Math.min(1.5, (plate.accent ?? 0) * accentScale);
   // damped spring recoil along the normal, plus a little twist
   const recoil = lit ? -0.2 * hitForce * Math.exp(-7 * tau) * Math.sin(30 * tau) : 0;
   const twist = lit ? 0.06 * hitForce * Math.exp(-6 * tau) * Math.sin(24 * tau) : 0;
-  const glow = lit ? 0.8 + 4.5 * Math.exp(-6.5 * tau) : 0;
+  const glow = lit ? 0.8 + (4.5 + 3.2 * effAccent) * Math.exp(-6.5 * tau) : 0;
   const z = 0.16 + PLATE_DEPTH / 2;
   return (
     <group position={[plate.x + plate.nx * recoil, plate.y + plate.ny * recoil, 0]} rotation={[0, 0, angle + twist]}>
@@ -86,23 +99,31 @@ const PlateMesh: React.FC<{ plate: Plate; t: number; thickness: number }> = ({ p
 };
 
 // ---------------------------------------------------------------- impact extras
-const Sparks: React.FC<{ plate: Plate; index: number; t: number; gravity: number }> = ({ plate, index, t, gravity }) => {
+const Sparks: React.FC<{ plate: Plate; index: number; t: number; gravity: number; accentScale: number }> = ({
+  plate,
+  index,
+  t,
+  gravity,
+  accentScale,
+}) => {
   const tau = Math.max(0, t - plate.t);
+  const effAccent = Math.min(1.5, (plate.accent ?? 0) * accentScale);
+  const count = SPARKS_PER_HIT + Math.round(effAccent * 16);
   const sparks = useMemo(() => {
     const rand = mulberry32(index * 7919 + 13);
     const base = Math.atan2(plate.ny, plate.nx);
-    return new Array(SPARKS_PER_HIT).fill(0).map(() => {
+    return new Array(count).fill(0).map(() => {
       const a = base + (rand() - 0.5) * 2.4;
-      const speed = (2.5 + rand() * 7) * (0.5 + plate.strength);
+      const speed = (2.5 + rand() * 7) * (0.5 + plate.strength) * (1 + 0.35 * effAccent);
       return {
         vx: Math.cos(a) * speed,
         vy: Math.sin(a) * speed,
         vz: (rand() - 0.35) * 3,
-        size: 0.03 + rand() * 0.05,
+        size: (0.03 + rand() * 0.05) * (1 + 0.35 * effAccent),
         life: SPARK_LIFE * (0.5 + rand() * 0.5),
       };
     });
-  }, [index, plate]);
+  }, [index, plate, count, effAccent]);
   const color = useMemo(() => new THREE.Color(plate.color).lerp(WHITE, 0.3).multiplyScalar(2.6), [plate.color]);
   return (
     <>
@@ -129,25 +150,48 @@ const Sparks: React.FC<{ plate: Plate; index: number; t: number; gravity: number
   );
 };
 
-const Shockwave: React.FC<{ plate: Plate; t: number }> = ({ plate, t }) => {
+const Shockwave: React.FC<{ plate: Plate; t: number; accentScale: number }> = ({ plate, t, accentScale }) => {
+  const outerColor = useMemo(() => new THREE.Color(plate.color).lerp(WHITE, 0.25), [plate.color]);
   const rawTau = t - plate.t;
-  const life = 0.45;
+  const effAccent = Math.min(1.5, (plate.accent ?? 0) * accentScale);
+  const life = effAccent > 0 ? 0.62 : 0.45;
   if (rawTau < -HIT_EPS || rawTau > life) return null;
   const tau = Math.max(0, rawTau);
-  const k = tau / life;
-  const radius = 0.42 + 1.85 * (1 - (1 - k) ** 3) * (0.6 + plate.strength * 0.6);
+  const primaryLife = 0.45;
+  const showPrimary = tau <= primaryLife;
+  const k = Math.min(1, tau / primaryLife);
+  const radius = (0.42 + 1.85 * (1 - (1 - k) ** 3) * (0.6 + plate.strength * 0.6)) * (1 + 0.35 * effAccent);
+  const outerK = Math.min(1, tau / life);
+  const outerRadius = 0.5 + (4.2 + 1.4 * effAccent) * (1 - (1 - outerK) ** 3);
   return (
-    <mesh position={[plate.hx, plate.hy, 0.02]} scale={radius}>
-      <ringGeometry args={[0.965, 1, 64]} />
-      <meshBasicMaterial
-        color={plate.color}
-        transparent
-        opacity={(1 - k) ** 2 * 0.45}
-        blending={THREE.AdditiveBlending}
-        depthWrite={false}
-        toneMapped={false}
-      />
-    </mesh>
+    <>
+      {showPrimary ? (
+        <mesh position={[plate.hx, plate.hy, 0.02]} scale={radius}>
+          <ringGeometry args={[0.965, 1, 64]} />
+          <meshBasicMaterial
+            color={plate.color}
+            transparent
+            opacity={(1 - k) ** 2 * (0.45 + 0.28 * effAccent)}
+            blending={THREE.AdditiveBlending}
+            depthWrite={false}
+            toneMapped={false}
+          />
+        </mesh>
+      ) : null}
+      {effAccent > 0 ? (
+        <mesh position={[plate.hx, plate.hy, 0.025]} scale={outerRadius}>
+          <ringGeometry args={[0.978, 1, 64]} />
+          <meshBasicMaterial
+            color={outerColor}
+            transparent
+            opacity={(1 - outerK) ** 2.4 * 0.38 * effAccent}
+            blending={THREE.AdditiveBlending}
+            depthWrite={false}
+            toneMapped={false}
+          />
+        </mesh>
+      ) : null}
+    </>
   );
 };
 
@@ -296,11 +340,22 @@ const PlateLights: React.FC<{ plates: Plate[]; t: number }> = ({ plates, t }) =>
 };
 
 // ---------------------------------------------------------------- scene
-export const Scene: React.FC<{ choreo: Choreo; t: number; frame: number; aspect: number }> = ({ choreo, t, frame, aspect }) => {
+export const Scene: React.FC<{
+  choreo: Choreo;
+  t: number;
+  frame: number;
+  aspect: number;
+  screenEffect?: ScreenEffectMode;
+  effectStrength?: number;
+}> = ({ choreo, t, frame, aspect, screenEffect, effectStrength }) => {
   const camX = sampleCurve(choreo.camera.x, choreo.camera.fps, t);
   const camY = sampleCurve(choreo.camera.y, choreo.camera.fps, t);
   const pulse = kickPulse(choreo, t);
   const level = sampleCurve(choreo.energy.rms, choreo.energy.fps, t);
+  const effectConfig = resolveScreenEffect(choreo, screenEffect, effectStrength);
+  const accentFx = accentEffectsAt(choreo, t, effectConfig);
+  const splashAccentScale =
+    effectConfig.mode === "both" || effectConfig.mode === "splash" ? effectConfig.strength : 0;
 
   const visible = useMemo(() => {
     const out: { plate: Plate; index: number }[] = [];
@@ -322,27 +377,50 @@ export const Scene: React.FC<{ choreo: Choreo; t: number; frame: number; aspect:
 
   return (
     <>
-      <CameraRig x={camX} y={camY} pulse={pulse} aspect={aspect} dist={choreo.camera.dist ?? 25.5} />
+      <CameraRig
+        x={camX}
+        y={camY}
+        pulse={pulse}
+        aspect={aspect}
+        dist={choreo.camera.dist ?? 25.5}
+        shakeX={accentFx.shakeX}
+        shakeY={accentFx.shakeY}
+        shakeZoom={accentFx.shakeZoom}
+        shakeRoll={accentFx.shakeRoll}
+      />
       <color attach="background" args={["#050506"]} />
       <ambientLight intensity={1.1 + 0.5 * level} color="#b4bcda" />
       <KeyLight x={camX} y={camY} />
       <PlateLights plates={litNewestFirst} t={t} />
+      <pointLight
+        position={[accentFx.lightX, accentFx.lightY, 1.8]}
+        color={accentFx.lightColor}
+        intensity={accentFx.lightIntensity}
+        distance={14}
+        decay={2}
+      />
       <Wall camY={camY} />
       {visible.map(({ plate, index }) => (
-        <PlateMesh key={index} plate={plate} t={t} thickness={choreo.plateThickness} />
+        <PlateMesh
+          key={index}
+          plate={plate}
+          t={t}
+          thickness={choreo.plateThickness}
+          accentScale={splashAccentScale}
+        />
       ))}
       {visible.map(({ plate, index }) =>
         t >= plate.t - HIT_EPS && t - plate.t < SPARK_LIFE ? (
           <React.Fragment key={index}>
-            <Sparks plate={plate} index={index} t={t} gravity={choreo.gravity} />
-            <Shockwave plate={plate} t={t} />
+            <Sparks plate={plate} index={index} t={t} gravity={choreo.gravity} accentScale={splashAccentScale} />
+            <Shockwave plate={plate} t={t} accentScale={splashAccentScale} />
           </React.Fragment>
         ) : null,
       )}
       {choreo.balls.map((_, k) => (
         <Ball key={k} choreo={choreo} t={t} ball={k} />
       ))}
-      <Effects frame={frame} pulse={pulse} />
+      <Effects frame={frame} pulse={pulse} accentFx={accentFx} />
     </>
   );
 };

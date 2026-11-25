@@ -89,6 +89,10 @@ def main() -> None:
                     help="disable snapping bounce times to exact 60 fps frame boundaries")
     ap.add_argument("--balls", default="auto", choices=["auto", "1", "2"],
                     help="number of balls; auto uses two side by side when the rhythm is too fast for one")
+    ap.add_argument("--screen-effect", default="both", choices=["both", "splash", "shake", "off"],
+                    help="screen effect triggered on important notes (default: both)")
+    ap.add_argument("--effect-strength", type=float, default=1.0,
+                    help="intensity multiplier for important-note screen effects (default: 1.0)")
     ap.add_argument("--redownload", action="store_true", help="re-download MP3 even if this YouTube URL is cached")
     ap.add_argument("--no-render", action="store_true", help="stop after choreography (use Studio to preview)")
     ap.add_argument("--frames", help="render only this frame range, e.g. 0-299")
@@ -105,6 +109,8 @@ def main() -> None:
         sys.exit(f"Invalid clip bounds: --clip-min={args.clip_min}, --clip-max={args.clip_max}")
     if args.clip_target <= 0:
         sys.exit(f"Invalid --clip-target={args.clip_target}")
+    if args.effect_strength < 0:
+        sys.exit(f"Invalid --effect-strength={args.effect_strength}")
 
     discovered_id: str | None = None
     catalog = None
@@ -390,12 +396,16 @@ def main() -> None:
 
     snap_fps = None if args.no_frame_snap else VIDEO_FPS
     choreo = choreograph(analysis, seed=args.seed, palette=args.palette, min_gap=args.min_gap,
-                         max_gap=args.max_gap, offset=args.offset, balls=args.balls, snap_fps=snap_fps)
+                         max_gap=args.max_gap, offset=args.offset, balls=args.balls, snap_fps=snap_fps,
+                         screen_effect=args.screen_effect, effect_strength=args.effect_strength)
     (song_dir / "choreo.json").write_text(json.dumps(choreo, separators=(",", ":")))
     r = choreo["report"]
     why = "auto" if args.balls == "auto" else "forced"
     print(f"      {r['balls']} ball(s) ({why}; two balls would catch {r['duo_gain']:.2f}x the notes of one)")
-    print(f"      {len(choreo['plates'])} bounces verified, {r['dropped_notes']} dropped, {time.time() - t0:.1f}s")
+    print(
+        f"      {len(choreo['plates'])} bounces verified, {r['dropped_notes']} dropped, "
+        f"{r['accent_notes']} accents (effect={r['screen_effect']}), {time.time() - t0:.1f}s"
+    )
     (ROOT / "public" / "songs" / "latest.json").write_text(json.dumps({"song": slug}))
     step += 1
 

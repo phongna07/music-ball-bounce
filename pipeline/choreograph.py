@@ -40,6 +40,7 @@ PALETTES = {
     "sunset": ["#ff5e5b", "#ffb347", "#ffd97d", "#ff8fab", "#c77dff", "#7b2cbf", "#ff9770", "#f72585"],
     "ice": ["#48cae4", "#90e0ef", "#ade8f4", "#7b9cff", "#b8c0ff", "#64dfdf", "#e0fbfc", "#5390d9"],
 }
+SCREEN_EFFECT_MODES = ("both", "splash", "shake", "off")
 
 
 # --------------------------------------------------------------------------
@@ -72,7 +73,7 @@ def _fill(chosen: list[dict], analysis: dict, min_gap: float, max_gap: float) ->
             inside = [t for t in beats if a + min_gap <= t <= b - min_gap and 0.25 <= t <= dur - 0.2]
             if inside:
                 mid = min(inside, key=lambda t: abs(t - (a + b) / 2))
-                chosen.append({"t": mid, "strength": 0.3, "melodic": 0.5, "pitch": None})
+                chosen.append({"t": mid, "strength": 0.3, "melodic": 0.5, "pitch": None, "fill": True})
                 chosen.sort(key=lambda n: n["t"])
                 filled = True
                 break
@@ -429,9 +430,147 @@ def _descent_rate(lanes: list[list[dict]]) -> float:
     return float(np.mean(rates))
 
 
+def _robust_norm(values: np.ndarray) -> np.ndarray:
+    """Normalize values to [0, 1] via [p15, p95] bounds with min/max fallback."""
+    arr = np.asarray(values, dtype=float)
+    if arr.size <= 1 or np.ptp(arr) < 1e-9:
+        return np.zeros_like(arr, dtype=float)
+    lo = float(np.percentile(arr, 15))
+    hi = float(np.percentile(arr, 95))
+    if hi - lo < 1e-9:
+        lo = float(arr.min())
+        hi = float(arr.max())
+    return np.clip((arr - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
+
+
+def score_plate_accents(plates: list[dict], plate_notes: list[dict], analysis: dict) -> int:
+    """Score musical importance per plate and select spaced accent hits for screen effects."""
+    for p in plates:
+        p["importance"] = 0.0
+        p["accent"] = 0.0
+
+    real_idx = [i for i, n in enumerate(plate_notes) if not n.get("fill")]
+    if not real_idx:
+        return 0
+
+    energy = analysis.get("energy") or {}
+    rms = np.asarray(energy.get("rms") or [], dtype=float)
+    low = np.asarray(energy.get("low") or [], dtype=float)
+    efps = float(energy.get("fps") or 60.0)
+    med_rms = float(np.median(rms)) if rms.size else 0.0
+    med_low = float(np.median(low)) if low.size else 0.0
+    pre_w = max(2, int(round(0.22 * efps)))
+    post_w = max(2, int(round(0.20 * efps)))
+
+    downbeats = np.asarray(analysis.get("downbeats") or [], dtype=float)
+    kicks = analysis.get("kicks") or []
+    kick_t = np.asarray([k["t"] for k in kicks], dtype=float)
+    kick_s = np.asarray([k["strength"] for k in kicks], dtype=float)
+    sections = analysis.get("sections") or []
+    duration = float(analysis["duration"])
+
+    times = np.asarray([float(p["t"]) for p in plates], dtype=float)
+    med_ioi = max(0.15, float(np.median(np.diff(times)))) if len(times) > 1 else 0.5
+    has_midi_meta = any(("vel_energy" in plate_notes[i] or "chord_size" in plate_notes[i]) for i in real_idx)
+
+    dyn_raw = np.zeros(len(real_idx), dtype=float)
+    chord_raw = np.zeros(len(real_idx), dtype=float)
+    rms_raw = np.zeros(len(real_idx), dtype=float)
+    low_raw = np.zeros(len(real_idx), dtype=float)
+    ago_raw = np.zeros(len(real_idx), dtype=float)
+    met_raw = np.zeros(len(real_idx), dtype=float)
+
+    for pos, idx in enumerate(real_idx):
+        t = float(plates[idx]["t"])
+        note = plate_notes[idx]
+        i_f = int(round(t * efps))
+
+        if rms.size:
+            r_pre = float(np.mean(rms[max(0, i_f - pre_w) : max(1, i_f - 1)])) if i_f > 1 else 0.0
+            r_post = float(np.max(rms[i_f : min(len(rms), i_f + post_w)])) if i_f < len(rms) else 0.0
+            base_r = max(r_pre, 0.25 * med_rms)
+            rms_raw[pos] = max(0.0, r_post - base_r) + 0.35 * r_post
+
+        if low.size:
+            l_pre = float(np.mean(low[max(0, i_f - pre_w) : max(1, i_f - 1)])) if i_f > 1 else 0.0
+            l_post = float(np.max(low[i_f : min(len(low), i_f + post_w)])) if i_f < len(low) else 0.0
+            base_l = max(l_pre, 0.25 * med_low)
+            low_raw[pos] = max(0.0, l_post - base_l) + 0.25 * l_post
+
+        gap_prev = float(times[idx] - times[idx - 1]) if idx > 0 else med_ioi
+        gap_next = float(times[idx + 1] - times[idx]) if idx + 1 < len(times) else max(0.0, duration - float(times[idx]))
+        ago_raw[pos] = 0.65 * min(2.5, gap_next / med_ioi) + 0.35 * min(2.0, gap_prev / med_ioi)
+
+        m = 0.0
+        if downbeats.size and float(np.min(np.abs(downbeats - t))) <= 0.095:
+            m += 0.65
+        if kick_t.size:
+            ki = int(np.argmin(np.abs(kick_t - t)))
+            if abs(float(kick_t[ki]) - t) <= 0.075:
+                m += 0.35 * float(kick_s[ki])
+        if any(abs(float(s["t0"]) - t) <= 0.35 and float(s["t0"]) > 0.5 for s in sections):
+            m += 0.35
+        met_raw[pos] = min(1.0, m)
+
+        if has_midi_meta:
+            dyn_raw[pos] = float(note.get("vel_energy", note["strength"]))
+            chord_raw[pos] = float(note.get("chord_size", 1)) + 0.05 * float(note.get("pitch_span", 0))
+        else:
+            dyn_raw[pos] = float(note.get("onset_raw", note["strength"]))
+
+    n_dyn = _robust_norm(dyn_raw)
+    n_chord = _robust_norm(chord_raw)
+    n_rms = _robust_norm(rms_raw)
+    n_low = _robust_norm(low_raw)
+    n_ago = _robust_norm(ago_raw)
+
+    if has_midi_meta:
+        imp = 0.28 * n_dyn + 0.22 * n_chord + 0.18 * n_rms + 0.12 * n_low + 0.10 * n_ago + 0.10 * met_raw
+    else:
+        imp = 0.22 * n_dyn + 0.28 * n_rms + 0.20 * n_low + 0.14 * n_ago + 0.16 * met_raw
+
+    imp_map: dict[int, float] = {}
+    for pos, idx in enumerate(real_idx):
+        val = float(np.clip(imp[pos], 0.0, 1.0))
+        plates[idx]["importance"] = round(val, 3)
+        imp_map[idx] = val
+
+    tempo = float(analysis.get("tempo") or 100.0)
+    beat_sec = 60.0 / max(50.0, min(180.0, tempo))
+    cooldown = max(1.5, min(2.4, 2.5 * beat_sec))
+    target_max = max(2, int(round(duration / 3.0)))
+    thresh = max(0.52, float(np.percentile(imp, 78)))
+
+    order = sorted(real_idx, key=lambda idx: (-imp_map[idx], float(plates[idx]["t"])))
+    selected: list[int] = []
+    for idx in order:
+        if imp_map[idx] < thresh:
+            break
+        if len(selected) >= target_max:
+            break
+        t = float(plates[idx]["t"])
+        if all(abs(t - float(plates[s]["t"])) >= cooldown for s in selected):
+            selected.append(idx)
+
+    if selected:
+        hi_imp = max(imp_map[s] for s in selected)
+        span = max(hi_imp - thresh, 0.12)
+        for idx in selected:
+            rel = float(np.clip((imp_map[idx] - thresh) / span, 0.0, 1.0))
+            accent = 0.45 + 0.55 * (0.65 * rel + 0.35 * imp_map[idx])
+            plates[idx]["accent"] = round(float(accent), 3)
+
+    return len(selected)
+
+
 def choreograph(analysis: dict, seed: int = 1, palette: str = "neon", min_gap: float = 0.17,
                 max_gap: float = 1.8, offset: float = 0.0, balls: str | int = "auto",
-                snap_fps: int | None = VIDEO_FPS) -> dict:
+                snap_fps: int | None = VIDEO_FPS, screen_effect: str = "both",
+                effect_strength: float = 1.0) -> dict:
+    if screen_effect not in SCREEN_EFFECT_MODES:
+        raise SystemExit(f"--screen-effect must be one of {', '.join(SCREEN_EFFECT_MODES)}")
+    if effect_strength < 0:
+        raise SystemExit("--effect-strength must be >= 0")
     duration = analysis["duration"]
     duo_notes, gain = split_notes(analysis, min_gap)
     if balls == "auto":
@@ -510,6 +649,7 @@ def choreograph(analysis: dict, seed: int = 1, palette: str = "neon", min_gap: f
                 "speed": round(float(abs(s["v_in"] @ s["n"])), 3),
                 "ball": ball,
                 "_k": k,
+                "_note": note,
             }
             if snap_fps:
                 plate_entry["frame"] = int(round(s["t"] * snap_fps))
@@ -533,8 +673,15 @@ def choreograph(analysis: dict, seed: int = 1, palette: str = "neon", min_gap: f
     # one plate list for the whole scene, in hit order; each ball maps its own hits into it
     plates.sort(key=lambda p: (p["t"], p["ball"]))
     index = [[0] * len(s[0]) for s in solved]
+    ordered_notes: list[dict] = []
     for gi, p in enumerate(plates):
         index[p["ball"]][p.pop("_k")] = gi
+        ordered_notes.append(p.pop("_note"))
+
+    accent_count = score_plate_accents(plates, ordered_notes, analysis)
+    report["accent_notes"] = accent_count
+    report["screen_effect"] = screen_effect
+    report["effect_strength"] = round(float(effect_strength), 3)
 
     # camera: zero-phase smoothed (mean) ball path, clamped so it never runs ahead of the fall
     t_arr = np.arange(0, duration + 1.0, 1.0 / CAM_FPS)
@@ -569,5 +716,6 @@ def choreograph(analysis: dict, seed: int = 1, palette: str = "neon", min_gap: f
         "beats": analysis["beats"],
         "energy": analysis["energy"],
         "sections": sections,
+        "screenEffect": {"mode": screen_effect, "strength": round(float(effect_strength), 3)},
         "report": report,
     }

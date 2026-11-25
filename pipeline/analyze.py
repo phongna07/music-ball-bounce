@@ -22,7 +22,7 @@ HOP = 128  # 5.8 ms per frame
 N_FFT = 1024
 ENERGY_FPS = 60
 
-ANALYSIS_VERSION = 2
+ANALYSIS_VERSION = 3
 FINE_SR = 44100
 FINE_N_FFT = 512  # 11.6 ms window for sharp onset localization
 FINE_HOP = 64  # 1.45 ms hop
@@ -172,12 +172,16 @@ def extract_midi_notes(
         t_cl = sum(t * (v * v) for t, _p, v in group) / max(w_sum, 1)
         max_vel = max(v for _t, _p, v in group)
         top_pitch = max(p for _t, p, v in group if v >= 0.7 * max_vel)
+        pitches = [p for _t, p, _v in group]
         notes.append(
             {
                 "t": round(float(t_cl), 6),
                 "strength": round(float(np.clip(max_vel / 100.0, 0.2, 1.0)), 3),
                 "melodic": 0.95,
                 "pitch": int(top_pitch),
+                "chord_size": len(group),
+                "pitch_span": int(max(pitches) - min(pitches)),
+                "vel_energy": round(float(math.sqrt(w_sum)) / 100.0, 3),
             }
         )
     notes.sort(key=lambda n: n["t"])
@@ -227,6 +231,7 @@ def analyze(
         coarse_t = _times(frames)
         refined_t = refine_onset_times(wav_path, coarse_t)
         nf, nh, np_ = _norm(env_full), _norm(env_h), _norm(env_p)
+        env_ref = float(np.percentile(env_full, 99.5)) if env_full.size else 1.0
         lo, hi = np.searchsorted(freqs, 130.0), np.searchsorted(freqs, 2000.0)
         notes = []
         for f, t_ref in zip(frames, refined_t):
@@ -242,6 +247,7 @@ def analyze(
                     "strength": round(float(np.clip(nf[f], 0, 1)), 3),
                     "melodic": round(h / (h + p + 1e-9), 3),
                     "pitch": pitch,
+                    "onset_raw": round(float(env_full[f] / env_ref) if env_ref > 1e-9 else 0.0, 3),
                 }
             )
         notes.sort(key=lambda n: n["t"])
