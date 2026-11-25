@@ -17,6 +17,8 @@ export type Plate = {
   speed: number;
   /** Which ball lands on this plate (version 2+). */
   ball?: number;
+  /** Snapped video frame index for impact (when frame snapping is enabled). */
+  frame?: number;
 };
 
 /** One ball: its flight segments, and for each of its hits the index into `Choreo.plates`. */
@@ -41,6 +43,8 @@ export type Choreo = {
 
 export const BALL_Z = 0.62;
 export const PLATE_DEPTH = 0.95;
+/** Tolerance (seconds) so exact frame-boundary hits never slip to the next frame from float rounding. */
+export const HIT_EPS = 1e-4;
 
 /** Index of the last item whose time is <= t, or -1. */
 export const lastIndexAtOrBefore = <T>(items: T[], t: number, time: (item: T) => number): number => {
@@ -68,9 +72,9 @@ export const normalizeChoreo = (raw: Choreo & { segments?: Segment[] }): Choreo 
 export const ballAt = (c: Choreo, t: number, ball = 0) => {
   const path = c.balls[ball];
   const first = path.segments[0];
-  const i = Math.max(0, lastIndexAtOrBefore(path.segments, t, (s) => s.t0));
+  const i = Math.max(0, lastIndexAtOrBefore(path.segments, t + HIT_EPS, (s) => s.t0));
   const s = path.segments[i];
-  const tau = Math.max(t, first.t0) - s.t0;
+  const tau = Math.max(0, Math.max(t, first.t0) - s.t0);
   return {
     x: s.x + s.vx * tau,
     y: s.y + s.vy * tau - 0.5 * c.gravity * tau * tau,

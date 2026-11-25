@@ -83,9 +83,10 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=1, help="different seeds give different layouts")
     ap.add_argument("--palette", default="neon", choices=["neon", "sunset", "ice"])
     ap.add_argument("--min-gap", type=float, default=0.17, help="shortest time between bounces, seconds")
-    ap.add_argument("--max-gap", type=float, default=1.3, help="longest silence before a beat is used instead")
-    # -0.023 cancels the lag of the coarse onset frames in analyze.py (measured with check_sync.py)
-    ap.add_argument("--offset", type=float, default=-0.023, help="shift every bounce by this many seconds")
+    ap.add_argument("--max-gap", type=float, default=1.8, help="longest silence before a beat is used instead")
+    ap.add_argument("--offset", type=float, default=0.0, help="optional manual timing shift for every bounce, seconds")
+    ap.add_argument("--no-frame-snap", action="store_true",
+                    help="disable snapping bounce times to exact 60 fps frame boundaries")
     ap.add_argument("--balls", default="auto", choices=["auto", "1", "2"],
                     help="number of balls; auto uses two side by side when the rhythm is too fast for one")
     ap.add_argument("--redownload", action="store_true", help="re-download MP3 even if this YouTube URL is cached")
@@ -177,9 +178,11 @@ def main() -> None:
     # synthesize -----------------------------------------------------------
     synth = None
     active_src = src
+    attack_map = None
+    sf_path: Path | None = None
     if should_synthesize:
         print(f"[{step}/{steps}] synthesizing local piano audio")
-        from synthesize import synthesize_piano_version
+        from synthesize import measure_soundfont_attack_map, synthesize_piano_version
 
         synth_dir = (ROOT / "work" / "youtube" / yt.video_id / "synth") if yt is not None else (work_dir / "synth")
         synth = synthesize_piano_version(
@@ -190,13 +193,16 @@ def main() -> None:
             reverb=not args.no_reverb,
         )
         active_src = synth.wav_path
+        sf_path = synth.soundfont_path
+        if sf_path is not None and sf_path.is_file():
+            attack_map = measure_soundfont_attack_map(sf_path)
         rel_wav = synth.wav_path.relative_to(ROOT) if synth.wav_path.is_relative_to(ROOT) else synth.wav_path
         state = "cached" if synth.cached else "synthesized"
         print(f"      {state}: {synth.note_count} notes, {synth.pedal_count} pedals ({synth.soundfont}) -> {rel_wav}")
         step += 1
 
     # decode / highlight clip ----------------------------------------------
-    from analyze import analyze
+    from analyze import ANALYSIS_VERSION, analyze
     from highlight import select_highlight, slice_audio_clip
 
     full_digest = sha1(active_src)
@@ -252,16 +258,27 @@ def main() -> None:
         if should_clip and (args.clip_start is not None or full_duration > args.clip_max):
             full_analysis_path = work_dir / "full_analysis.json"
             full_analysis_stamp = work_dir / "full_analysis.sha1"
+            full_analysis = None
             if (
                 full_analysis_path.is_file()
                 and full_analysis_stamp.is_file()
                 and full_analysis_stamp.read_text() == full_digest
             ):
-                full_analysis = json.loads(full_analysis_path.read_text(encoding="utf-8"))
-            else:
+                try:
+                    cached_full = json.loads(full_analysis_path.read_text(encoding="utf-8"))
+                    if cached_full.get("version") == ANALYSIS_VERSION:
+                        full_analysis = cached_full
+                except (OSError, json.JSONDecodeError):
+                    full_analysis = None
+            if full_analysis is None:
                 t0 = time.time()
                 print(f"      analysing full track ({full_duration:.1f}s) for highlight selection...")
-                full_analysis = analyze(str(full_audio_path))
+                full_analysis = analyze(
+                    str(full_audio_path),
+                    midi_path=synth.midi_path if synth is not None else None,
+                    clip_start=0.0,
+                    attack_map=attack_map,
+                )
                 full_analysis_path.write_text(json.dumps(full_analysis), encoding="utf-8")
                 full_analysis_stamp.write_text(full_digest, encoding="utf-8")
                 print(f"      full analysis ready in {time.time() - t0:.1f}s")
@@ -296,6 +313,7 @@ def main() -> None:
                 "clipped": win.clipped,
                 "synthesized": should_synthesize,
                 "midi_path": str(synth.midi_path) if synth is not None else None,
+                "soundfont_path": str(sf_path) if sf_path is not None else None,
             }
         else:
             shutil.copyfile(full_audio_path, wav)
@@ -313,33 +331,66 @@ def main() -> None:
                 "clipped": False,
                 "synthesized": should_synthesize,
                 "midi_path": str(synth.midi_path) if synth is not None else None,
+                "soundfont_path": str(sf_path) if sf_path is not None else None,
             }
         clip_meta_path.write_text(json.dumps(clip_payload, indent=2), encoding="utf-8")
+    clip_meta = old_clip if clip_cached else clip_payload
     step += 1
 
     # analyse --------------------------------------------------------------
+    active_midi: Path | None = None
+    if should_synthesize:
+        midi_str = clip_meta.get("midi_path")
+        if isinstance(midi_str, str) and Path(midi_str).is_file():
+            active_midi = Path(midi_str)
+        elif synth is not None and synth.midi_path.is_file():
+            active_midi = synth.midi_path
+    clip_start = float(clip_meta.get("start", 0.0)) if clip_meta.get("clipped") else 0.0
+
     clip_digest = sha1(wav)
+    midi_digest = sha1(active_midi) if active_midi is not None else "none"
+    sf_tag = (
+        f"{sf_path.name}:{sf_path.stat().st_size}:{attack_map.get('median_delay', 0.0)}"
+        if sf_path is not None and attack_map is not None
+        else "none"
+    )
+    analysis_stamp = f"v{ANALYSIS_VERSION}:{clip_digest}:{midi_digest}:{sf_tag}:{clip_start:.6f}"
     stamp = work_dir / "source.sha1"
     analysis_path = work_dir / "analysis.json"
-    if stamp.is_file() and stamp.read_text() == clip_digest and analysis_path.is_file():
-        print(f"[{step}/{steps}] analysis cached")
-        analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    analysis = None
+    if stamp.is_file() and stamp.read_text() == analysis_stamp and analysis_path.is_file():
+        try:
+            cached_analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+            if cached_analysis.get("version") == ANALYSIS_VERSION:
+                analysis = cached_analysis
+        except (OSError, json.JSONDecodeError):
+            analysis = None
+    if analysis is not None:
+        src_tag = "midi+sf2" if analysis.get("note_source") == "midi" else "audio"
+        print(f"[{step}/{steps}] analysis cached ({src_tag})")
     else:
         print(f"[{step}/{steps}] analysing audio")
         t0 = time.time()
-        analysis = analyze(str(wav))
+        analysis = analyze(
+            str(wav),
+            midi_path=active_midi,
+            clip_start=clip_start,
+            attack_map=attack_map,
+        )
         analysis_path.write_text(json.dumps(analysis), encoding="utf-8")
-        stamp.write_text(clip_digest, encoding="utf-8")
-        print(f"      {len(analysis['notes'])} onsets, {analysis['tempo']} bpm, {time.time() - t0:.1f}s")
+        stamp.write_text(analysis_stamp, encoding="utf-8")
+        src_tag = "midi+sf2" if analysis.get("note_source") == "midi" else "audio"
+        print(f"      {len(analysis['notes'])} onsets ({src_tag}), {analysis['tempo']} bpm, {time.time() - t0:.1f}s")
     step += 1
 
     # choreograph ----------------------------------------------------------
     print(f"[{step}/{steps}] solving choreography")
     t0 = time.time()
-    from choreograph import choreograph
+    from choreograph import VIDEO_FPS, choreograph
 
+    snap_fps = None if args.no_frame_snap else VIDEO_FPS
     choreo = choreograph(analysis, seed=args.seed, palette=args.palette, min_gap=args.min_gap,
-                         max_gap=args.max_gap, offset=args.offset, balls=args.balls)
+                         max_gap=args.max_gap, offset=args.offset, balls=args.balls, snap_fps=snap_fps)
     (song_dir / "choreo.json").write_text(json.dumps(choreo, separators=(",", ":")))
     r = choreo["report"]
     why = "auto" if args.balls == "auto" else "forced"

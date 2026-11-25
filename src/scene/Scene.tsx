@@ -4,6 +4,7 @@ import * as THREE from "three";
 import {
   BALL_Z,
   Choreo,
+  HIT_EPS,
   PLATE_DEPTH,
   Plate,
   ballAt,
@@ -51,8 +52,9 @@ const CameraRig: React.FC<{ x: number; y: number; pulse: number; aspect: number;
 
 // ---------------------------------------------------------------- plates
 const PlateMesh: React.FC<{ plate: Plate; t: number; thickness: number }> = ({ plate, t, thickness }) => {
-  const tau = t - plate.t;
-  const lit = tau >= 0;
+  const rawTau = t - plate.t;
+  const lit = rawTau >= -HIT_EPS;
+  const tau = lit ? Math.max(0, rawTau) : rawTau;
   const color = useMemo(() => new THREE.Color(plate.color), [plate.color]);
   const angle = Math.atan2(plate.ny, plate.nx) - Math.PI / 2;
   const hitForce = Math.min(1, plate.speed / 18);
@@ -85,7 +87,7 @@ const PlateMesh: React.FC<{ plate: Plate; t: number; thickness: number }> = ({ p
 
 // ---------------------------------------------------------------- impact extras
 const Sparks: React.FC<{ plate: Plate; index: number; t: number; gravity: number }> = ({ plate, index, t, gravity }) => {
-  const tau = t - plate.t;
+  const tau = Math.max(0, t - plate.t);
   const sparks = useMemo(() => {
     const rand = mulberry32(index * 7919 + 13);
     const base = Math.atan2(plate.ny, plate.nx);
@@ -128,11 +130,12 @@ const Sparks: React.FC<{ plate: Plate; index: number; t: number; gravity: number
 };
 
 const Shockwave: React.FC<{ plate: Plate; t: number }> = ({ plate, t }) => {
-  const tau = t - plate.t;
+  const rawTau = t - plate.t;
   const life = 0.45;
-  if (tau < 0 || tau > life) return null;
+  if (rawTau < -HIT_EPS || rawTau > life) return null;
+  const tau = Math.max(0, rawTau);
   const k = tau / life;
-  const radius = 0.3 + 1.9 * (1 - (1 - k) ** 3) * (0.6 + plate.strength * 0.6);
+  const radius = 0.42 + 1.85 * (1 - (1 - k) ** 3) * (0.6 + plate.strength * 0.6);
   return (
     <mesh position={[plate.hx, plate.hy, 0.02]} scale={radius}>
       <ringGeometry args={[0.965, 1, 64]} />
@@ -195,16 +198,22 @@ const Trail: React.FC<{ choreo: Choreo; t: number; ball: number }> = ({ choreo, 
 const Ball: React.FC<{ choreo: Choreo; t: number; ball: number }> = ({ choreo, t, ball }) => {
   const b = ballAt(choreo, t, ball);
   const last = b.lastPlate >= 0 ? choreo.plates[b.lastPlate] : null;
-  const sinceHit = last ? t - last.t : 10;
+  const sinceHit = last ? Math.max(0, t - last.t) : 10;
   const tint = useMemo(() => new THREE.Color(), []);
   tint.set(last ? last.color : "#ffffff").lerp(WHITE, 0.45);
 
-  // squash against the plate right after a hit, stretch along the velocity otherwise
+  // squash flush against the plate right on impact, stretch along the velocity otherwise
   let angle: number;
   let along: number;
+  let bx = b.x;
+  let by = b.y;
   if (last && sinceHit < 0.09) {
     angle = Math.atan2(last.ny, last.nx);
     along = 1 - 0.32 * (1 - sinceHit / 0.09) * Math.min(1, last.speed / 14);
+    const pinFade = Math.max(0, 1 - sinceHit / 0.045);
+    const squashShift = (1 - along) * choreo.ballRadius * pinFade;
+    bx = b.x - last.nx * squashShift;
+    by = b.y - last.ny * squashShift;
   } else {
     angle = Math.atan2(b.vy, b.vx);
     along = 1 + Math.min(0.22, Math.hypot(b.vx, b.vy) * 0.007);
@@ -217,7 +226,7 @@ const Ball: React.FC<{ choreo: Choreo; t: number; ball: number }> = ({ choreo, t
   return (
     <>
       <Trail choreo={choreo} t={t} ball={ball} />
-      <group position={[b.x, b.y, BALL_Z]} rotation={[0, 0, angle]} scale={[along, across, across]}>
+      <group position={[bx, by, BALL_Z]} rotation={[0, 0, angle]} scale={[along, across, across]}>
         <mesh castShadow>
           <sphereGeometry args={[choreo.ballRadius, 48, 32]} />
           <meshStandardMaterial color="#ffffff" emissive={tint} emissiveIntensity={flash} roughness={0.25} />
@@ -227,7 +236,7 @@ const Ball: React.FC<{ choreo: Choreo; t: number; ball: number }> = ({ choreo, t
           <meshBasicMaterial color={ring} />
         </mesh>
       </group>
-      <pointLight position={[b.x, b.y, BALL_Z + 0.5]} color={tint} intensity={5 + 14 * Math.exp(-sinceHit * 8)} distance={9} decay={2} />
+      <pointLight position={[bx, by, BALL_Z + 0.5]} color={tint} intensity={5 + 14 * Math.exp(-sinceHit * 8)} distance={9} decay={2} />
     </>
   );
 };
@@ -270,7 +279,7 @@ const PlateLights: React.FC<{ plates: Plate[]; t: number }> = ({ plates, t }) =>
     <>
       {slots.map((p, i) => {
         if (!p) return <pointLight key={i} intensity={0} distance={8} decay={2} />;
-        const tau = t - p.t;
+        const tau = Math.max(0, t - p.t);
         return (
           <pointLight
             key={i}
@@ -303,7 +312,7 @@ export const Scene: React.FC<{ choreo: Choreo; t: number; frame: number; aspect:
 
   // newest hits first, so the freshest plates always own a light
   const litNewestFirst = useMemo(() => {
-    const newest = lastIndexAtOrBefore(choreo.plates, t, (p) => p.t);
+    const newest = lastIndexAtOrBefore(choreo.plates, t + HIT_EPS, (p) => p.t);
     const out: Plate[] = [];
     for (let i = newest; i >= 0 && out.length < LIGHT_POOL; i--) {
       if (Math.abs(choreo.plates[i].y - camY) < VIEW_RANGE + 4) out.push(choreo.plates[i]);
@@ -323,7 +332,7 @@ export const Scene: React.FC<{ choreo: Choreo; t: number; frame: number; aspect:
         <PlateMesh key={index} plate={plate} t={t} thickness={choreo.plateThickness} />
       ))}
       {visible.map(({ plate, index }) =>
-        t >= plate.t && t - plate.t < SPARK_LIFE ? (
+        t >= plate.t - HIT_EPS && t - plate.t < SPARK_LIFE ? (
           <React.Fragment key={index}>
             <Sparks plate={plate} index={index} t={t} gravity={choreo.gravity} />
             <Shockwave plate={plate} t={t} />

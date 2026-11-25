@@ -52,6 +52,7 @@ TRANSKUN_ASSETS = (
     "params.json",
 )
 SYNTH_CACHE_VERSION = 1
+ATTACK_MAP_VERSION = 1
 
 
 @dataclass
@@ -73,6 +74,7 @@ class SynthesisResult:
     duration: float
     soundfont: str
     cached: bool
+    soundfont_path: Path | None = None
 
 
 def _sha1_file(path: Path) -> str:
@@ -746,6 +748,7 @@ def synthesize_piano_version(
             duration=float(old_meta.get("duration") or sf.info(str(wav_path)).duration),
             soundfont=sf_path.name,
             cached=True,
+            soundfont_path=sf_path,
         )
 
     if same_midi:
@@ -802,7 +805,145 @@ def synthesize_piano_version(
         duration=dur,
         soundfont=sf_path.name,
         cached=False,
+        soundfont_path=sf_path,
     )
+
+
+# ---------------------------------------------------------------------------
+# SoundFont attack-latency calibration
+# ---------------------------------------------------------------------------
+def measure_soundfont_attack_map(
+    soundfont_path: Path,
+    *,
+    sample_rate: int = 44100,
+) -> dict[str, Any]:
+    """Measure per-(pitch, velocity) sample pre-attack latency for a SoundFont.
+
+    Acoustic SoundFonts such as Salamander Grand Piano include ~12-20 ms of
+    hammer/felt pre-roll between MIDI note_on and the crisp transient cliff.
+    Probing a sparse pitch x velocity grid once (~1s) and caching beside the
+    .sf2 lets MIDI-based sync lock directly onto the audible strike.
+    """
+    sf_path = Path(soundfont_path).expanduser().resolve()
+    sf_stat = sf_path.stat()
+    cache_path = sf_path.with_suffix(".attack_map.json")
+
+    if cache_path.is_file():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if (
+                cached.get("version") == ATTACK_MAP_VERSION
+                and cached.get("soundfont_name") == sf_path.name
+                and cached.get("soundfont_size") == sf_stat.st_size
+                and cached.get("sample_rate") == sample_rate
+                and isinstance(cached.get("delays"), dict)
+                and cached["delays"]
+            ):
+                return cached
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    pitches = list(range(21, 109, 3))
+    velocities = [45, 80, 115]
+
+    with tempfile.TemporaryDirectory(prefix="mbb-sf2-probe-") as tmp:
+        tmp_dir = Path(tmp)
+        mid_path = tmp_dir / "probe.mid"
+        wav_path = tmp_dir / "probe.wav"
+
+        mid = mido.MidiFile(type=1, ticks_per_beat=960)
+        tempo_us = 500_000
+        tps = 960 * (1_000_000.0 / tempo_us)
+
+        meta_track = mido.MidiTrack()
+        meta_track.append(mido.MetaMessage("set_tempo", tempo=tempo_us, time=0))
+        meta_track.append(mido.MetaMessage("end_of_track", time=0))
+        mid.tracks.append(meta_track)
+
+        piano_track = mido.MidiTrack()
+        piano_track.append(mido.Message("program_change", channel=0, program=0, time=0))
+        raw_msgs: list[tuple[int, int, mido.Message]] = []
+        probes: list[tuple[float, int, int]] = []
+        for idx, (pitch, vel) in enumerate((p, v) for p in pitches for v in velocities):
+            t_on = 0.05 + idx * 0.25
+            probes.append((t_on, pitch, vel))
+            raw_msgs.append((int(round(t_on * tps)), 2, mido.Message("note_on", channel=0, note=pitch, velocity=vel, time=0)))
+            raw_msgs.append((int(round((t_on + 0.12) * tps)), 1, mido.Message("note_off", channel=0, note=pitch, velocity=0, time=0)))
+            raw_msgs.append((int(round((t_on + 0.20) * tps)), 0, mido.Message("control_change", channel=0, control=120, value=0, time=0)))
+
+        raw_msgs.sort(key=lambda item: (item[0], item[1]))
+        prev_tick = 0
+        for tick, _prio, msg in raw_msgs:
+            piano_track.append(msg.copy(time=max(0, tick - prev_tick)))
+            prev_tick = tick
+        piano_track.append(mido.MetaMessage("end_of_track", time=0))
+        mid.tracks.append(piano_track)
+        mid.save(str(mid_path))
+
+        render_midi_to_wav(mid_path, wav_path, sf_path, sample_rate=sample_rate, gain=0.8, reverb=False)
+        audio, sr = sf.read(str(wav_path), dtype="float32", always_2d=True)
+        mono = audio.mean(axis=1)
+
+    delays: dict[str, float] = {}
+    win_samples = int(round(0.080 * sr))
+    for t_on, pitch, vel in probes:
+        i0 = max(0, int(round(t_on * sr)))
+        i1 = min(len(mono), i0 + win_samples)
+        seg = mono[i0:i1]
+        if seg.size == 0:
+            continue
+        env_full = np.abs(seg)
+        pk_full = float(env_full.max())
+        if pk_full < 1e-6:
+            continue
+        env_hf = np.abs(np.diff(seg, prepend=seg[0]))
+        pk_hf = float(env_hf.max())
+        ix_full = np.flatnonzero(env_full >= 0.15 * pk_full)
+        d_full = int(ix_full[0]) / sr if ix_full.size else 0.0
+        if pk_hf > 1e-7:
+            ix_hf = np.flatnonzero(env_hf >= 0.15 * pk_hf)
+            d_hf = int(ix_hf[0]) / sr if ix_hf.size else d_full
+        else:
+            d_hf = d_full
+        # min(full, hf) tracks the ~16 ms hammer transient even on low bass strings whose fundamental crests later.
+        delay = float(np.clip(min(d_full, d_hf), 0.0, 0.035))
+        delays[f"{pitch}:{vel}"] = round(delay, 6)
+
+    median_delay = round(float(np.median(list(delays.values()))), 6) if delays else 0.0
+    attack_map: dict[str, Any] = {
+        "version": ATTACK_MAP_VERSION,
+        "soundfont_name": sf_path.name,
+        "soundfont_size": sf_stat.st_size,
+        "sample_rate": sample_rate,
+        "pitches": pitches,
+        "velocities": velocities,
+        "median_delay": median_delay,
+        "delays": delays,
+    }
+
+    tmp_cache = cache_path.with_name(f".{cache_path.name}.tmp.{os.getpid()}")
+    try:
+        tmp_cache.write_text(json.dumps(attack_map, indent=2), encoding="utf-8")
+        os.replace(tmp_cache, cache_path)
+    except OSError:
+        tmp_cache.unlink(missing_ok=True)
+
+    return attack_map
+
+
+def lookup_attack_delay(attack_map: dict[str, Any] | None, pitch: int, velocity: int) -> float:
+    """Return calibrated sample pre-attack delay (seconds) for a MIDI (pitch, velocity)."""
+    if not attack_map:
+        return 0.0
+    pitches = attack_map.get("pitches") or []
+    velocities = attack_map.get("velocities") or []
+    delays = attack_map.get("delays") or {}
+    fallback = float(attack_map.get("median_delay", 0.0))
+    if not pitches or not velocities:
+        return fallback
+    best_p = min(pitches, key=lambda p: (abs(int(p) - int(pitch)), int(p)))
+    best_v = min(velocities, key=lambda v: (abs(int(v) - int(velocity)), int(v)))
+    return float(delays.get(f"{best_p}:{best_v}", fallback))
 
 
 def main(argv: list[str] | None = None) -> None:

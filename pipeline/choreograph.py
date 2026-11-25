@@ -21,6 +21,7 @@ PLATE_TH = 0.14
 CONTACT = BALL_R + PLATE_TH / 2  # ball centre to plate centre line at impact
 CORRIDOR = 3.1  # half width the path should stay inside
 CAM_FPS = 60
+VIDEO_FPS = 60
 FINE_STEP = 0.0005  # time step for arcs that touch the plate being placed (matches verify)
 SELF_TOL = 1e-3  # allowed dip below CONTACT for those arcs; verify allows 2e-3
 
@@ -78,14 +79,32 @@ def _fill(chosen: list[dict], analysis: dict, min_gap: float, max_gap: float) ->
     return chosen
 
 
-def _shift(chosen: list[dict], offset: float) -> list[dict]:
+def _shift(chosen: list[dict], offset: float, snap_fps: int | None = None) -> list[dict]:
+    out: list[dict] = []
+    prev_frame = -1
     for c in chosen:
-        c["t"] = round(c["t"] + offset, 4)
-    return [c for c in chosen if c["t"] > 0.05]
+        t = float(c["t"]) + offset
+        if t <= 0.05:
+            continue
+        item = dict(c)
+        if snap_fps:
+            frame = max(prev_frame + 1, int(round(t * snap_fps)))
+            prev_frame = frame
+            item["t"] = round(frame / snap_fps, 6)
+        else:
+            item["t"] = round(t, 6)
+        out.append(item)
+    return out
 
 
-def select_notes(analysis: dict, min_gap: float, max_gap: float, offset: float) -> list[dict]:
-    return _shift(_fill(_pick(analysis, min_gap), analysis, min_gap, max_gap), offset)
+def select_notes(
+    analysis: dict,
+    min_gap: float,
+    max_gap: float,
+    offset: float,
+    snap_fps: int | None = VIDEO_FPS,
+) -> list[dict]:
+    return _shift(_fill(_pick(analysis, min_gap), analysis, min_gap, max_gap), offset, snap_fps)
 
 
 def _weight(notes: list[dict]) -> float:
@@ -411,7 +430,8 @@ def _descent_rate(lanes: list[list[dict]]) -> float:
 
 
 def choreograph(analysis: dict, seed: int = 1, palette: str = "neon", min_gap: float = 0.17,
-                max_gap: float = 1.3, offset: float = -0.023, balls: str | int = "auto") -> dict:
+                max_gap: float = 1.8, offset: float = 0.0, balls: str | int = "auto",
+                snap_fps: int | None = VIDEO_FPS) -> dict:
     duration = analysis["duration"]
     duo_notes, gain = split_notes(analysis, min_gap)
     if balls == "auto":
@@ -422,9 +442,10 @@ def choreograph(analysis: dict, seed: int = 1, palette: str = "neon", min_gap: f
             raise SystemExit("--balls must be auto, 1 or 2")
 
     if count == 1:
-        lane_notes = [select_notes(analysis, min_gap, max_gap, offset)]
+        lane_notes = [select_notes(analysis, min_gap, max_gap, offset, snap_fps=snap_fps)]
     else:
-        lane_notes = [_shift(_fill(notes, analysis, min_gap, max_gap), offset) for notes in duo_notes]
+        duo_max_gap = min(max_gap, 1.35)
+        lane_notes = [_shift(_fill(notes, analysis, min_gap, duo_max_gap), offset, snap_fps) for notes in duo_notes]
     if any(len(n) < 2 for n in lane_notes):
         raise SystemExit("Not enough onsets found in this audio to choreograph.")
     iois = np.concatenate([np.diff([n["t"] for n in notes]) for notes in lane_notes])
@@ -477,8 +498,8 @@ def choreograph(analysis: dict, seed: int = 1, palette: str = "neon", min_gap: f
             if c == last_c:
                 c = (c + 1) % len(colours)
             last_c = c
-            plates.append({
-                "t": round(s["t"], 4),
+            plate_entry = {
+                "t": round(s["t"], 6),
                 "x": round(s["centre"][0], 4), "y": round(s["centre"][1], 4),
                 "nx": round(float(s["n"][0]), 5), "ny": round(float(s["n"][1]), 5),
                 "len": round(s["len"], 3),
@@ -489,7 +510,10 @@ def choreograph(analysis: dict, seed: int = 1, palette: str = "neon", min_gap: f
                 "speed": round(float(abs(s["v_in"] @ s["n"])), 3),
                 "ball": ball,
                 "_k": k,
-            })
+            }
+            if snap_fps:
+                plate_entry["frame"] = int(round(s["t"] * snap_fps))
+            plates.append(plate_entry)
         p0 = steps[0]["p"]
         segs = [{"t0": steps[0]["t"] - lead, "x": float(p0[0]), "y": float(p0[1]) + 0.5 * g * lead * lead,
                  "vx": 0.0, "vy": 0.0}]
@@ -502,6 +526,9 @@ def choreograph(analysis: dict, seed: int = 1, palette: str = "neon", min_gap: f
     report["dropped_notes"] = dropped
     report["balls"] = count
     report["duo_gain"] = round(gain, 3)
+    report["offset"] = offset
+    report["snap_fps"] = snap_fps
+    report["note_source"] = analysis.get("note_source", "audio")
 
     # one plate list for the whole scene, in hit order; each ball maps its own hits into it
     plates.sort(key=lambda p: (p["t"], p["ball"]))
@@ -525,7 +552,7 @@ def choreograph(analysis: dict, seed: int = 1, palette: str = "neon", min_gap: f
     for segs in ball_segs:
         for s in segs:
             for key in s:
-                s[key] = round(s[key], 5)
+                s[key] = round(s[key], 6 if key == "t0" else 5)
 
     return {
         "version": 2,

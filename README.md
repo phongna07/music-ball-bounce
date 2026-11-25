@@ -85,8 +85,10 @@ Useful options:
 | `--seed 2` | A different plate layout for the same song |
 | `--palette neon\|sunset\|ice` | Plate colours |
 | `--min-gap 0.17` | Shortest time between bounces, in seconds. Raise it for fewer bounces |
+| `--max-gap 1.8` | Longest silence before a beat-grid fill bounce is inserted, in seconds |
+| `--offset 0.0` | Optional manual shift for every bounce earlier or later, in seconds |
+| `--no-frame-snap` | Disable snapping bounce times to exact 60 fps video frames |
 | `--balls auto\|1\|2` | Number of balls. `auto` (default) switches to two balls side by side when the rhythm is too fast for one |
-| `--offset -0.023` | Shift every bounce earlier or later, in seconds |
 | `--redownload` | Re-download the `.mp3` even if this YouTube URL is already cached |
 | `--no-render` | Stop after choreography, then preview with `npm run dev` |
 | `--frames 0-299` | Render only part of the video |
@@ -174,10 +176,8 @@ Remotion Studio opens the most recently processed song with audio and a scrubber
 0. **Download** (`pipeline/youtube.py`, when given a YouTube URL): fetches audio with `yt-dlp` and extracts an `.mp3` cached under `work/youtube/<video-id>/`.
 1. **Synthesize piano** (`pipeline/synthesize.py`, default for YouTube tracks): transcribes the audio locally to expressive MIDI (notes, velocities, sustain & soft pedals) via `Transkun v2 ONNX` (`work/models/transkun/`) and renders our own mastered studio piano track with `FluidSynth` + Salamander Grand Piano V3 (`work/soundfonts/`), cached under `work/youtube/<video-id>/synth/`.
 2. **Decode & Highlight Clip** (`ffmpeg` + `pipeline/highlight.py`): prepares 44.1 kHz stereo audio and, by default (`--clip-min 35 --clip-max 60`), scores sections/downbeats/onsets to extract the strongest 35–60s highlight window with raised-cosine fades into `public/songs/<song>/audio.wav` (pass `--full` to keep the full song).
-3. **Analyse** (`pipeline/analyze.py`): onsets, pitch, beats, kicks, sections and
-   energy curves, cached in `work/<song>/analysis.json`.
-4. **Choreograph** (`pipeline/choreograph.py`): picks the notes to bounce on, then
-   solves where each plate goes. The ball is never simulated: each arc is a
+3. **Analyse** (`pipeline/analyze.py`): for synthesized piano tracks, extracts note clusters directly from the MIDI and shifts them by the calibrated per-(pitch, velocity) SoundFont attack latency; for raw audio, refines onset peaks onto 44.1 kHz / 1.45 ms fine spectral-flux transients. Also computes beats, kicks, sections and energy curves, cached in `work/<song>/analysis.json`.
+4. **Choreograph** (`pipeline/choreograph.py`): picks the notes to bounce on, snaps impact times to exact 60 fps frame boundaries so the ball meets the plate on the rendered frame, and solves where each plate goes. The ball is never simulated: each arc is a
    closed-form parabola and each plate is tilted so the reflection produces the
    next arc. A fine-step check then confirms no arc touches a plate it should not.
    Output: `public/songs/<song>/choreo.json`.
